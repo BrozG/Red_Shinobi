@@ -14,14 +14,15 @@ from typing import Callable, Dict, Any, Awaitable, List, Optional
 
 from rich.console import Console
 from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import NestedCompleter
+from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text import HTML
 
 from red_shinobi.core import brain, config
 from red_shinobi.core.mcp_client import MCPManager
 from red_shinobi.core.config import reload_keys
 from red_shinobi.core.nvidia_catalog import MODEL_CATALOG, get_first_working_model
-from red_shinobi.commands import auth_cmds, mcp_cmds, model_cmds, file_cmds
+from red_shinobi.commands import auth_cmds, mcp_cmds, model_cmds, file_cmds, erasemodel_cmds, refresh_cmds
 
 # =============================================================================
 # GLOBAL INSTANCES
@@ -45,6 +46,70 @@ active_model_id: Optional[str] = None
 
 THEME_COLOR = "red"
 ACCENT_COLOR = "red"
+
+
+# =============================================================================
+# CUSTOM COMPLETER
+# =============================================================================
+
+class RedShinobiCompleter(Completer):
+    """Custom completer for RED SHINOBI with command and model completion."""
+    
+    COMMANDS = [
+        "/key",
+        "/models",
+        "/model",
+        "/refresh",
+        "/erasemodel",
+        "/help",
+        "/clear",
+        "/save",
+        "/chatbox",
+        "/file",
+        "/system",
+        "/mcp",
+        "/mcp-list",
+        "/mcp-disconnect",
+        "/info",
+        "/read",
+        "/exit",
+    ]
+    
+    def get_completions(self, document: Document, complete_event):
+        """Generate completions based on current input."""
+        text = document.text_before_cursor
+        
+        # Model completion with @
+        if "@" in text:
+            # Get the part after the last @
+            at_index = text.rfind("@")
+            prefix = text[at_index + 1:]
+            
+            # Complete with models from catalog
+            for model_id in MODEL_CATALOG.keys():
+                if model_id.lower().startswith(prefix.lower()):
+                    yield Completion(
+                        model_id,
+                        start_position=-len(prefix),
+                        display=f"@{model_id}",
+                        display_meta="model"
+                    )
+        
+        # Command completion with /
+        elif text.startswith("/"):
+            for cmd in self.COMMANDS:
+                if cmd.startswith(text):
+                    yield Completion(
+                        cmd,
+                        start_position=-len(text),
+                        display=cmd,
+                        display_meta="command"
+                    )
+
+
+def get_completer() -> RedShinobiCompleter:
+    """Create a dynamic completer with available commands and models."""
+    return RedShinobiCompleter()
 
 
 # =============================================================================
@@ -89,30 +154,7 @@ def print_banner() -> None:
     console.print("[dim]────────────────────────────────────────────────────────[/dim]")
     model_display = current_model if current_model else "[yellow]<no-model>[/yellow]"
     console.print(f"[dim]Current Model:[/dim] {model_display}")
-    console.print("[dim]Get started: /key → /models refresh → /model <id>[/dim]\n")
-
-
-def get_completer() -> NestedCompleter:
-    """Create a dynamic NestedCompleter with available commands."""
-    return NestedCompleter.from_nested_dict({
-        "/key": None,
-        "/models": None,
-        "/model": None,
-        "/set-model": None,
-        "/help": None,
-        "/clear": None,
-        "/save": None,
-        "/chatbox": None,
-        "/file": None,
-        "/system": None,
-        "/mcp": None,
-        "/mcp-list": None,
-        "/mcp-disconnect": None,
-        "/info": None,
-        "/read": None,
-        "/exit": None,
-        "/quit": None,
-    })
+    console.print("[dim]Quick start: /key → /models → /model @<name>[/dim]\n")
 
 
 # =============================================================================
@@ -124,33 +166,40 @@ def cmd_help() -> None:
     model_display = f"[cyan]{current_model[:50] if current_model else '<no-model>'}[/cyan]" if current_model else "[yellow]<no-model>[/yellow]"
     
     help_text = f"""
-[{THEME_COLOR}]RED SHINOBI Commands[/{THEME_COLOR}]
+[{THEME_COLOR}]RED SHINOBI[/{THEME_COLOR}] - Quick Reference
 
-  [bold]/key[/bold] <provider>  Set API keys (NVIDIA, OpenAI, etc.)
-  [bold]/models refresh[/bold]  Discover models from NVIDIA endpoints
-  [bold]/models add[/bold]      Add custom OpenAI-compatible endpoint
-  [bold]/models verify[/bold]   Verify models are working
-  [bold]/models[/bold]       Show catalog entries
-  [bold]/model[/bold] <id>   Select a model from catalog
-  [bold]/system[/bold]       Update model system prompt
-  [bold]/info[/bold]         Show model info
-  [bold]/chatbox[/bold]      Launch graphical UI (multi-model)
-  [bold]/file[/bold]         Query a file with AI
-  [bold]/read[/bold]         Display file contents
-  [bold]/save[/bold]         Save conversation
-  [bold]/mcp[/bold]          Connect to MCP server
-  [bold]/mcp-list[/bold]     List MCP servers
-  [bold]/mcp-disconnect[/bold] Disconnect MCP server
-  [bold]/clear[/bold]        Clear screen
-  [bold]/exit[/bold]         Exit
+[bold]Setup & Model Management[/bold]
+  /key              Add API keys and models
+  /models           List all models in catalog
+  /model <id>       Select a model (use @ to autocomplete)
+  /refresh          Verify models in catalog
+  /erasemodel       Remove model(s) from catalog
+
+[bold]Chat & Files[/bold]
+  /file <path>      Query a file with AI
+  /read <path>      Display file contents
+  /save             Save conversation to markdown
+
+[bold]MCP Servers[/bold]
+  /mcp              Connect to MCP server
+  /mcp-list         Show connected servers
+  /mcp-disconnect   Disconnect server
+
+[bold]System[/bold]
+  /chatbox          Launch graphical UI
+  /system           Update model system prompt
+  /info             Show model details
+  /clear            Clear screen
+  /help             Show this help
+  /exit             Exit RED SHINOBI
 
 [{THEME_COLOR}]Current Model:[/{THEME_COLOR}] {model_display}
 
-[dim]Getting started:[/dim]
-  [dim]1. /key NVIDIA <your_key>     - Set your NVIDIA_API_KEY[/dim]
-  [dim]2. /models refresh            - Discover available models[/dim]
-  [dim]3. /models verify --limit 10  - Test models (optional)[/dim]
-  [dim]4. /model <id>                - Select a model[/dim]
+[dim]Quick Start:[/dim]
+  [dim]1. /key → select provider → enter API key (models added automatically)[/dim]
+  [dim]2. /models → see all available models[/dim]
+  [dim]3. /model <name> → start chatting (type @ to autocomplete)[/dim]
+  [dim]4. /refresh → verify models work (optional)[/dim]
 """
     console.print(help_text)
 
@@ -203,28 +252,47 @@ def cmd_set_model(args: str) -> None:
     active_model_id = model_id
     console.print(f"[green]✓ Model set to: {model_id}[/green]")
     
+    # Check for known incompatible model patterns
+    incompatible_patterns = ["guard", "moderation", "classifier", "safety"]
+    is_likely_incompatible = any(pattern in model_id.lower() for pattern in incompatible_patterns)
+    
     # Show verification status if available
     if entry.get("ok") is True:
         console.print(f"[dim]Status: Verified ({entry.get('latency_ms')}ms)[/dim]")
     elif entry.get("ok") is False:
-        console.print(f"[yellow]⚠ Model failed verification, but you can try it anyway[/yellow]")
+        error = entry.get("error", "")
+        if "400" in str(error) or "BadRequest" in str(error) or is_likely_incompatible:
+            console.print(f"[yellow]⚠ WARNING: This model appears incompatible with standard chat API[/yellow]")
+            console.print(f"[dim]It may be a classifier/safety model, not a chat model. Use /erasemodel to remove.[/dim]")
+        else:
+            console.print(f"[yellow]⚠ Model failed verification, but you can try it anyway[/yellow]")
     else:
-        console.print(f"[dim]Run /models verify to test this model[/dim]")
+        if is_likely_incompatible:
+            console.print(f"[yellow]⚠ Note: Model name suggests it may not be a standard chat model[/yellow]")
+        console.print(f"[dim]Run /refresh to test this model[/dim]")
 
 
 
-def cmd_chatbox() -> None:
+async def cmd_chatbox(
+    args: str,
+    session: PromptSession,
+    mcp_manager_param: MCPManager,
+    session_history: list
+) -> None:
     """Launch the Textual UI with shared MCP manager."""
     console.print("\n[dim]Launching RED SHINOBI UI...[/dim]\n")
     try:
-        from red_shinobi.interface.ui import run_ui
-        run_ui(mcp_manager=mcp_manager)
+        from red_shinobi.interface.ui import RedShinobiApp
+        app = RedShinobiApp(mcp_manager=mcp_manager)
+        await app.run_async()
         console.print("\n[dim]Back to CLI[/dim]\n")
     except ImportError as e:
         console.print(f"[{ACCENT_COLOR}][x] Textual not installed: {e}[/{ACCENT_COLOR}]")
         console.print("[dim]Install with: pip install textual[/dim]")
     except Exception as e:
         console.print(f"[{ACCENT_COLOR}][x] Error launching UI: {e}[/{ACCENT_COLOR}]")
+        import traceback
+        console.print(f"[dim]{traceback.format_exc()}[/dim]")
 
 
 # =============================================================================
@@ -241,11 +309,10 @@ async def run_conversation(user_input: str) -> None:
     # Check if model is selected
     if current_model is None:
         console.print(f"\n[{ACCENT_COLOR}][x] No model selected.[/{ACCENT_COLOR}]")
-        console.print("[dim]Get started:[/dim]")
-        console.print("[dim]  1. /key              - Set your NVIDIA_API_KEY[/dim]")
-        console.print("[dim]  2. /models refresh   - Discover available models[/dim]")
-        console.print("[dim]  3. /models verify    - Test models (optional)[/dim]")
-        console.print("[dim]  4. /model <id>       - Select a model to use[/dim]\n")
+        console.print("[dim]Quick start:[/dim]")
+        console.print("[dim]  1. /key         - Add API key (models added automatically)[/dim]")
+        console.print("[dim]  2. /models      - List available models[/dim]")
+        console.print("[dim]  3. /model @...  - Select a model (@ to autocomplete)[/dim]\n")
         return
     
     console.print(f"\n[dim]You:[/dim] {user_input}\n")
@@ -280,6 +347,7 @@ async def run_conversation(user_input: str) -> None:
 COMMAND_REGISTRY: Dict[str, Callable[..., Awaitable[None]]] = {
     "/key": auth_cmds.execute,
     "/models": model_cmds.execute,
+    "/refresh": refresh_cmds.execute,
     "/system": model_cmds.system_execute,
     "/info": model_cmds.info_execute,
     "/file": file_cmds.execute,
@@ -288,11 +356,12 @@ COMMAND_REGISTRY: Dict[str, Callable[..., Awaitable[None]]] = {
     "/mcp": mcp_cmds.execute,
     "/mcp-list": mcp_cmds.list_servers_cmd,
     "/mcp-disconnect": mcp_cmds.disconnect_cmd,
+    "/erasemodel": erasemodel_cmds.execute,
+    "/chatbox": cmd_chatbox,
 }
 
 SYNC_COMMANDS: Dict[str, Callable[..., None]] = {
     "/help": lambda: cmd_help(),
-    "/chatbox": lambda: cmd_chatbox(),
 }
 
 
@@ -302,7 +371,7 @@ async def handle_command(user_input: str, session: PromptSession) -> bool:
     cmd = parts[0].lower()
     args = parts[1] if len(parts) > 1 else ""
     
-    if cmd in ["/exit", "/quit"]:
+    if cmd == "/exit":
         console.print(f"[{THEME_COLOR}]Goodbye from RED SHINOBI[/{THEME_COLOR}]")
         await mcp_manager.cleanup()
         return False

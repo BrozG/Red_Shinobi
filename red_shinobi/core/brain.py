@@ -439,9 +439,35 @@ async def chat_worker(
     except RateLimitError:
         return f"{model_name}: Rate limit hit."
     except APIError as e:
-        return f"{model_name}: API error - {type(e).__name__}"
+        error_msg = str(e)
+        error_type = type(e).__name__
+        
+        # Try to extract more details from the error
+        error_details = ""
+        if hasattr(e, 'response') and e.response:
+            try:
+                error_body = e.response.json() if hasattr(e.response, 'json') else {}
+                if 'detail' in error_body:
+                    error_details = f" | {error_body['detail']}"
+                elif 'error' in error_body:
+                    error_details = f" | {error_body.get('error', {}).get('message', '')}"
+            except:
+                pass
+        
+        # Provide helpful error message for common issues
+        if "400" in error_msg or "BadRequestError" in error_type:
+            full_error = f"{model_name}: API error - BadRequestError{error_details}"
+            if "llama-guard" in model_name.lower() or "guard" in model_name.lower():
+                return f"{full_error}\n⚠️  This appears to be a safety classifier model, not a chat model. Use /erasemodel to remove it."
+            return f"{full_error}\n⚠️  This model may require special parameters or is incompatible. Details: {error_msg[:300]}"
+        elif "404" in error_msg:
+            return f"{model_name}: API error - Model not found (404). The model may not be available on this endpoint."
+        elif "401" in error_msg or "403" in error_msg:
+            return f"{model_name}: API error - Authentication failed. Check your API key."
+        else:
+            return f"{model_name}: API error - {error_type}: {error_msg[:300]}{error_details}"
     except Exception as e:
-        return f"{model_name}: Error - {e}"
+        return f"{model_name}: Error - {str(e)[:200]}"
 
 
 # =============================================================================
