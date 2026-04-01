@@ -33,7 +33,8 @@ session_history: List[str] = []
 
 # Current model state - CLI uses single model at a time
 # Can be a friendly name (from MODEL_REGISTRY) or a catalog model ID
-current_model: str = brain.DEFAULT_MODEL
+# None until user selects with /model
+current_model: Optional[str] = None
 
 # Active model ID from catalog (None until /models refresh is run)
 active_model_id: Optional[str] = None
@@ -86,35 +87,31 @@ def print_banner() -> None:
     console.print("[dim]Made by[/dim] [bold red]Brojen Gurung[/bold red]")
     console.print("[dim]github.com/BrozG[/dim]")
     console.print("[dim]────────────────────────────────────────────────────────[/dim]")
-    console.print(f"[dim]Current Model:[/dim] [bold cyan]{current_model}[/bold cyan]")
-    console.print("[dim]Use /set-model <name> or /model <name> to switch[/dim]\n")
+    model_display = current_model if current_model else "[yellow]<no-model>[/yellow]"
+    console.print(f"[dim]Current Model:[/dim] {model_display}")
+    console.print("[dim]Get started: /key → /models refresh → /model <id>[/dim]\n")
 
 
 def get_completer() -> NestedCompleter:
-    """Create a dynamic NestedCompleter with available models."""
-    available_models = brain.get_all_model_names()
-    model_dict = {model_name: None for model_name in available_models}
-    at_model_dict = {f"@{model_name}": None for model_name in available_models}
-    
+    """Create a dynamic NestedCompleter with available commands."""
     return NestedCompleter.from_nested_dict({
         "/key": None,
         "/models": None,
-        "/model": model_dict,
-        "/set-model": model_dict,
+        "/model": None,
+        "/set-model": None,
         "/help": None,
         "/clear": None,
         "/save": None,
         "/chatbox": None,
         "/file": None,
-        "/system": model_dict,
+        "/system": None,
         "/mcp": None,
         "/mcp-list": None,
         "/mcp-disconnect": None,
-        "/info": model_dict,
+        "/info": None,
         "/read": None,
         "/exit": None,
         "/quit": None,
-        **at_model_dict,
     })
 
 
@@ -124,14 +121,17 @@ def get_completer() -> NestedCompleter:
 
 def cmd_help() -> None:
     """Display help information."""
-    models_list = ", ".join(brain.get_all_model_names()[:5]) + "..."
+    model_display = f"[cyan]{current_model[:50] if current_model else '<no-model>'}[/cyan]" if current_model else "[yellow]<no-model>[/yellow]"
     
     help_text = f"""
 [{THEME_COLOR}]RED SHINOBI Commands[/{THEME_COLOR}]
 
-  [bold]/model[/bold] <name>  Switch to a different model (alias: /set-model)
-  [bold]/models[/bold]       List all available models
-  [bold]/key[/bold]          Set API keys
+  [bold]/key[/bold] <provider>  Set API keys (NVIDIA, OpenAI, etc.)
+  [bold]/models refresh[/bold]  Discover models from NVIDIA endpoints
+  [bold]/models add[/bold]      Add custom OpenAI-compatible endpoint
+  [bold]/models verify[/bold]   Verify models are working
+  [bold]/models[/bold]       Show catalog entries
+  [bold]/model[/bold] <id>   Select a model from catalog
   [bold]/system[/bold]       Update model system prompt
   [bold]/info[/bold]         Show model info
   [bold]/chatbox[/bold]      Launch graphical UI (multi-model)
@@ -144,65 +144,73 @@ def cmd_help() -> None:
   [bold]/clear[/bold]        Clear screen
   [bold]/exit[/bold]         Exit
 
-[{THEME_COLOR}]Current Model:[/{THEME_COLOR}] [cyan]{current_model}[/cyan]
+[{THEME_COLOR}]Current Model:[/{THEME_COLOR}] {model_display}
 
-[dim]Use @ModelName in message to route to specific model[/dim]
-[dim]Available: {models_list}[/dim]
+[dim]Getting started:[/dim]
+  [dim]1. /key NVIDIA <your_key>     - Set your NVIDIA_API_KEY[/dim]
+  [dim]2. /models refresh            - Discover available models[/dim]
+  [dim]3. /models verify --limit 10  - Test models (optional)[/dim]
+  [dim]4. /model <id>                - Select a model[/dim]
 """
     console.print(help_text)
 
 
 def cmd_set_model(args: str) -> None:
     """
-    Set the current model. Usage: /set-model <ModelName> or /model <ModelName>
+    Set the current model. Usage: /set-model <model_id> or /model <model_id>
     
-    Supports both:
-    - Friendly names from MODEL_REGISTRY (e.g., Nemotron-4-340B)
-    - Catalog model IDs from /models refresh (e.g., meta/llama-3.1-70b-instruct)
+    Only accepts models from MODEL_CATALOG (discovered via /models refresh or /models add).
     """
     global current_model, active_model_id
     
-    model_name = args.strip()
+    model_id = args.strip()
     
-    if not model_name:
-        console.print(f"[cyan]Current model: {current_model}[/cyan]")
-        if active_model_id:
-            console.print(f"[dim]Active catalog ID: {active_model_id}[/dim]")
-        console.print("[dim]Usage: /model <ModelName or catalog ID>[/dim]")
-        console.print(f"[dim]Registry: {', '.join(brain.get_all_model_names()[:5])}...[/dim]")
+    if not model_id:
+        if current_model:
+            console.print(f"[cyan]Current model: {current_model}[/cyan]")
+        else:
+            console.print("[yellow]No model selected.[/yellow]")
+        console.print("[dim]Usage: /model <model_id>[/dim]")
         if MODEL_CATALOG:
             console.print(f"[dim]Catalog: {len(MODEL_CATALOG)} models (run /models to see)[/dim]")
+        else:
+            console.print("[dim]Run /models refresh to discover models[/dim]")
         return
     
-    # First try MODEL_REGISTRY (friendly names)
-    normalized = brain.normalize_model_name(model_name)
-    if normalized:
-        current_model = normalized
-        active_model_id = None
-        console.print(f"[green]✓ Model set to: {current_model}[/green]")
+    # Check MODEL_CATALOG only
+    if model_id not in MODEL_CATALOG:
+        console.print(f"[{ACCENT_COLOR}][x] Model '{model_id}' not in catalog.[/{ACCENT_COLOR}]")
+        if MODEL_CATALOG:
+            console.print(f"[dim]Run /models to see {len(MODEL_CATALOG)} available models[/dim]")
+        else:
+            console.print("[dim]Run /models refresh to discover models[/dim]")
         return
     
-    # Then try MODEL_CATALOG (direct model IDs)
-    if model_name in MODEL_CATALOG:
-        entry = MODEL_CATALOG[model_name]
-        api_key = config.get_env_key(entry["api_key_env"])
-        
-        if entry["endpoint_type"] != "local" and not api_key:
-            console.print(f"[{ACCENT_COLOR}][x] Missing key: {entry['api_key_env']}[/{ACCENT_COLOR}]")
-            console.print(f"[dim]Set env var or use: /key {entry['api_key_env']} <value>[/dim]")
-            return
-        
-        active_model_id = model_name
-        current_model = model_name
-        console.print(f"[green]✓ Model set to catalog ID: {model_name}[/green]")
+    # Check key requirement
+    entry = MODEL_CATALOG[model_id]
+    api_key_env = entry["api_key_env"]
+    endpoint_type = entry["endpoint_type"]
+    
+    api_key = config.get_env_key(api_key_env) if api_key_env else None
+    
+    if endpoint_type != "local" and not api_key:
+        console.print(f"[{ACCENT_COLOR}][x] Missing API key: {api_key_env}[/{ACCENT_COLOR}]")
+        console.print(f"[dim]Set with: export {api_key_env}=<your_key> or use /key[/dim]")
         return
     
-    # Not found anywhere
-    console.print(f"[{ACCENT_COLOR}][x] Model not found: {model_name}[/{ACCENT_COLOR}]")
-    if MODEL_CATALOG:
-        console.print("[dim]Run /models to see available models[/dim]")
+    # Set the model
+    current_model = model_id
+    active_model_id = model_id
+    console.print(f"[green]✓ Model set to: {model_id}[/green]")
+    
+    # Show verification status if available
+    if entry.get("ok") is True:
+        console.print(f"[dim]Status: Verified ({entry.get('latency_ms')}ms)[/dim]")
+    elif entry.get("ok") is False:
+        console.print(f"[yellow]⚠ Model failed verification, but you can try it anyway[/yellow]")
     else:
-        console.print("[dim]Run /models refresh to discover NVIDIA models[/dim]")
+        console.print(f"[dim]Run /models verify to test this model[/dim]")
+
 
 
 def cmd_chatbox() -> None:
@@ -230,8 +238,14 @@ async def run_conversation(user_input: str) -> None:
     """
     global current_model
     
-    if not brain.get_all_model_names():
-        console.print(f"[{ACCENT_COLOR}][x] No models available. Configure API key with /key[/{ACCENT_COLOR}]")
+    # Check if model is selected
+    if current_model is None:
+        console.print(f"\n[{ACCENT_COLOR}][x] No model selected.[/{ACCENT_COLOR}]")
+        console.print("[dim]Get started:[/dim]")
+        console.print("[dim]  1. /key              - Set your NVIDIA_API_KEY[/dim]")
+        console.print("[dim]  2. /models refresh   - Discover available models[/dim]")
+        console.print("[dim]  3. /models verify    - Test models (optional)[/dim]")
+        console.print("[dim]  4. /model <id>       - Select a model to use[/dim]\n")
         return
     
     console.print(f"\n[dim]You:[/dim] {user_input}\n")
@@ -329,8 +343,9 @@ async def main_loop() -> None:
     
     while True:
         try:
+            prompt_display = current_model[:15] if current_model else "&lt;no-model&gt;"
             user_input = await session.prompt_async(
-                HTML(f"<b><ansired>{current_model[:15]}></ansired></b> ")
+                HTML(f"<b><ansired>RedShinobi{prompt_display}></ansired></b> ")
             )
             user_input = user_input.strip()
             

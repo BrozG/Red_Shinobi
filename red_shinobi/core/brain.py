@@ -323,15 +323,32 @@ async def chat_worker(
 ) -> str:
     """
     Single model chat with full tool calling support.
-    Loops through tool calls until the model gives a final text response.
+    Uses MODEL_CATALOG for connectivity, MODEL_REGISTRY for system prompts (optional).
     """
-    if model_name not in MODEL_REGISTRY:
-        return f"Unknown model: {model_name}"
+    # Check MODEL_CATALOG for connectivity info
+    if model_name not in MODEL_CATALOG:
+        return f"Model {model_name} not in catalog. Run /models refresh or manually add with /models add."
     
-    model_info = MODEL_REGISTRY[model_name]
+    catalog_entry = MODEL_CATALOG[model_name]
+    
+    # Resolve API credentials
+    base_url = catalog_entry["base_url"]
+    api_key_env = catalog_entry["api_key_env"]
+    endpoint_type = catalog_entry["endpoint_type"]
+    
+    api_key = config.get_env_key(api_key_env) if api_key_env else None
+    
+    if endpoint_type != "local" and not api_key:
+        return f"Missing API key for {model_name}. Set {api_key_env} environment variable or use /key."
+    
+    # Get system prompt from MODEL_REGISTRY if available, else use fallback
+    if model_name in MODEL_REGISTRY:
+        system_prompt = MODEL_REGISTRY[model_name]["system_prompt"]
+    else:
+        system_prompt = "You are a helpful AI assistant in RED SHINOBI."
     
     messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": model_info["system_prompt"]}
+        {"role": "system", "content": system_prompt}
     ]
     
     if chat_history:
@@ -341,11 +358,6 @@ async def chat_worker(
     messages.append({"role": "user", "content": prompt})
     
     try:
-        # Resolve endpoint dynamically from catalog or fallback to defaults
-        base_url, api_key, resolve_err = resolve_model_endpoint(model_name)
-        if resolve_err:
-            return f"{model_name}: {resolve_err}"
-        
         api_client = AsyncOpenAI(base_url=base_url, api_key=api_key or "")
         
         tools = await get_mcp_tools_for_llm(mcp_manager)
@@ -354,7 +366,7 @@ async def chat_worker(
         rprint(f"[bold yellow]DEBUG: Passing {len(tools) if tools else 0} tools to {model_name}[/bold yellow]")
         
         api_kwargs: Dict[str, Any] = {
-            "model": model_info["api_model_id"],
+            "model": model_name,  # Use the catalog model_id directly
             "messages": messages,
             "temperature": TEMPERATURE,
             "max_tokens": MAX_TOKENS
@@ -463,8 +475,13 @@ async def run_agent_conversation(
     """
     conversation: List[Dict[str, Any]] = []
     
-    if not active_models:
-        active_models = [DEFAULT_MODEL]
+    if not active_models or len(active_models) == 0:
+        return [{
+            "role": "assistant",
+            "content": "No model selected. Set API key with /key, then run /models refresh and /model <id>.",
+            "model": "system"
+        }]
+    
     
     user_mentioned = extract_mentioned_model(task)
     if user_mentioned:
