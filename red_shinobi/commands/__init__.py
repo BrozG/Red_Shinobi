@@ -9,6 +9,8 @@ from red_shinobi.commands.auth_cmds import execute as auth_execute
 from red_shinobi.commands.mcp_cmds import execute as mcp_execute
 from red_shinobi.commands.model_cmds import execute as model_execute, system_execute
 from red_shinobi.commands.file_cmds import execute as file_execute, save_execute
+from red_shinobi.commands.erasemodel_cmds import execute as erasemodel_execute
+from red_shinobi.commands.refresh_cmds import execute as refresh_execute
 
 __all__ = [
     "auth_execute",
@@ -17,4 +19,6 @@ __all__ = [
     "system_execute",
     "file_execute",
     "save_execute",
+    "erasemodel_execute",
+    "refresh_execute",
 ]

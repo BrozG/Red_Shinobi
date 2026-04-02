@@ -323,15 +323,32 @@ async def chat_worker(
 ) -> str:
     """
     Single model chat with full tool calling support.
-    Loops through tool calls until the model gives a final text response.
+    Uses MODEL_CATALOG for connectivity, MODEL_REGISTRY for system prompts (optional).
     """
-    if model_name not in MODEL_REGISTRY:
-        return f"Unknown model: {model_name}"
+    # Check MODEL_CATALOG for connectivity info
+    if model_name not in MODEL_CATALOG:
+        return f"Model {model_name} not in catalog. Run /models refresh or manually add with /models add."
     
-    model_info = MODEL_REGISTRY[model_name]
+    catalog_entry = MODEL_CATALOG[model_name]
+    
+    # Resolve API credentials
+    base_url = catalog_entry["base_url"]
+    api_key_env = catalog_entry["api_key_env"]
+    endpoint_type = catalog_entry["endpoint_type"]
+    
+    api_key = config.get_env_key(api_key_env) if api_key_env else None
+    
+    if endpoint_type != "local" and not api_key:
+        return f"Missing API key for {model_name}. Set {api_key_env} environment variable or use /key."
+    
+    # Get system prompt from MODEL_REGISTRY if available, else use fallback
+    if model_name in MODEL_REGISTRY:
+        system_prompt = MODEL_REGISTRY[model_name]["system_prompt"]
+    else:
+        system_prompt = "You are a helpful AI assistant in RED SHINOBI."
     
     messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": model_info["system_prompt"]}
+        {"role": "system", "content": system_prompt}
     ]
     
     if chat_history:
@@ -341,11 +358,6 @@ async def chat_worker(
     messages.append({"role": "user", "content": prompt})
     
     try:
-        # Resolve endpoint dynamically from catalog or fallback to defaults
-        base_url, api_key, resolve_err = resolve_model_endpoint(model_name)
-        if resolve_err:
-            return f"{model_name}: {resolve_err}"
-        
         api_client = AsyncOpenAI(base_url=base_url, api_key=api_key or "")
         
         tools = await get_mcp_tools_for_llm(mcp_manager)
@@ -354,7 +366,7 @@ async def chat_worker(
         rprint(f"[bold yellow]DEBUG: Passing {len(tools) if tools else 0} tools to {model_name}[/bold yellow]")
         
         api_kwargs: Dict[str, Any] = {
-            "model": model_info["api_model_id"],
+            "model": model_name,  # Use the catalog model_id directly
             "messages": messages,
             "temperature": TEMPERATURE,
             "max_tokens": MAX_TOKENS
@@ -427,9 +439,35 @@ async def chat_worker(
     except RateLimitError:
         return f"{model_name}: Rate limit hit."
     except APIError as e:
-        return f"{model_name}: API error - {type(e).__name__}"
+        error_msg = str(e)
+        error_type = type(e).__name__
+        
+        # Try to extract more details from the error
+        error_details = ""
+        if hasattr(e, 'response') and e.response:
+            try:
+                error_body = e.response.json() if hasattr(e.response, 'json') else {}
+                if 'detail' in error_body:
+                    error_details = f" | {error_body['detail']}"
+                elif 'error' in error_body:
+                    error_details = f" | {error_body.get('error', {}).get('message', '')}"
+            except:
+                pass
+        
+        # Provide helpful error message for common issues
+        if "400" in error_msg or "BadRequestError" in error_type:
+            full_error = f"{model_name}: API error - BadRequestError{error_details}"
+            if "llama-guard" in model_name.lower() or "guard" in model_name.lower():
+                return f"{full_error}\n⚠️  This appears to be a safety classifier model, not a chat model. Use /erasemodel to remove it."
+            return f"{full_error}\n⚠️  This model may require special parameters or is incompatible. Details: {error_msg[:300]}"
+        elif "404" in error_msg:
+            return f"{model_name}: API error - Model not found (404). The model may not be available on this endpoint."
+        elif "401" in error_msg or "403" in error_msg:
+            return f"{model_name}: API error - Authentication failed. Check your API key."
+        else:
+            return f"{model_name}: API error - {error_type}: {error_msg[:300]}{error_details}"
     except Exception as e:
-        return f"{model_name}: Error - {e}"
+        return f"{model_name}: Error - {str(e)[:200]}"
 
 
 # =============================================================================
@@ -463,8 +501,13 @@ async def run_agent_conversation(
     """
     conversation: List[Dict[str, Any]] = []
     
-    if not active_models:
-        active_models = [DEFAULT_MODEL]
+    if not active_models or len(active_models) == 0:
+        return [{
+            "role": "assistant",
+            "content": "No model selected. Set API key with /key, then run /models refresh and /model <id>.",
+            "model": "system"
+        }]
+    
     
     user_mentioned = extract_mentioned_model(task)
     if user_mentioned:
