@@ -39,7 +39,6 @@ UI_COMMANDS: Dict[str, str] = {
     "/set":            "Switch model",
     "/refresh":        "Verify models work",
     "/erasemodel":     "Remove model",
-    "/file":           "Query file with AI",
     "/read":           "Display file contents",
     "/save":           "Save conversation",
     "/mcp":            "Connect MCP server",
@@ -695,6 +694,87 @@ class RedShinobiApp(App):
         inp.focus()
         self._selection_active = False
 
+    def _on_erase_selected(self, model_to_remove: str) -> None:
+        """Handle model selection from overlay for /erasemodel."""
+        feed = self.query_one("#feed", ChatFeed)
+        self._selection_active = False
+
+        if model_to_remove == "all":
+            self._model_catalog.clear()
+            self._model_names.clear()
+            feed.add_message("system", "[green]✓[/green] All models removed from catalog")
+            self._refresh_sidebar()
+        elif model_to_remove == "failed":
+            to_remove = [k for k, v in self._model_catalog.items() if v.get("ok") is False]
+            for m in to_remove:
+                del self._model_catalog[m]
+                if m in self._model_names:
+                    self._model_names.remove(m)
+            feed.add_message("system", f"[green]✓[/green] Removed {len(to_remove)} failed models")
+            self._refresh_sidebar()
+        else:
+            if model_to_remove in self._model_catalog:
+                del self._model_catalog[model_to_remove]
+                if model_to_remove in self._model_names:
+                    self._model_names.remove(model_to_remove)
+                feed.add_message("system", f"[green]✓[/green] Removed model: {model_to_remove}")
+                self._refresh_sidebar()
+            else:
+                feed.add_message("error", f"Model '{model_to_remove}' not found")
+
+    def _on_mcp_disconnect_selected(self, server_name: str) -> None:
+        """Handle server selection from overlay for /mcp-disconnect."""
+        feed = self.query_one("#feed", ChatFeed)
+        self._selection_active = False
+
+        if server_name == "← Cancel":
+            feed.add_message("system", "[dim]Cancelled[/dim]")
+            return
+
+        async def do_disconnect():
+            try:
+                await self.mcp_manager.disconnect_server(server_name)
+                feed.add_message("system", f"[green]✓[/green] Disconnected from {server_name}")
+                self._sync_status()
+            except Exception as e:
+                feed.add_message("error", f"Disconnect failed: {e}")
+
+        import asyncio
+        asyncio.create_task(do_disconnect())
+
+    def _on_system_model_selected(self, model_name: str) -> None:
+        """After picking model for /system, pre-fill input for the prompt."""
+        inp = self.query_one("#cmd-input", CommandInput)
+        feed = self.query_one("#feed", ChatFeed)
+        self._selection_active = False
+        inp.value = f"/system {model_name} "
+        inp.focus()
+        feed.add_message("system", f"[dim]Now type the new system prompt after '{model_name}'[/dim]")
+
+    def _show_model_info(self, model_name: str) -> None:
+        """Display detailed info for a specific model."""
+        feed = self.query_one("#feed", ChatFeed)
+        feed.add_message("system", "─" * 60)
+        feed.add_message("system", f"[bold red]MODEL INFO — {model_name}[/bold red]")
+        if model_name in self._model_catalog:
+            info = self._model_catalog[model_name]
+            feed.add_message("system", f"  Provider: {info.get('endpoint_type', 'unknown')}")
+            feed.add_message("system", f"  API Key:  {info.get('api_key_env', 'N/A')}")
+            if info.get('ok') is True:
+                feed.add_message("system", f"  Status:   [green]Verified[/green] ({info.get('latency_ms', '?')}ms)")
+            elif info.get('ok') is False:
+                feed.add_message("system", f"  Status:   [red]Failed[/red] — {info.get('error', 'unknown')}")
+            else:
+                feed.add_message("system", "  Status:   [yellow]Not verified[/yellow] (run /refresh)")
+        else:
+            feed.add_message("system", "  [dim]Model not in catalog[/dim]")
+        feed.add_message("system", "─" * 60)
+
+    def _on_info_selected(self, model_name: str) -> None:
+        """Handle model selection from overlay for /info."""
+        self._selection_active = False
+        self._show_model_info(model_name)
+
     # ── sidebar model click ─────────────────────────────────────────────────
 
     @on(Button.Pressed)
@@ -722,6 +802,10 @@ class RedShinobiApp(App):
             feed.add_message("system", "[bold red]COMMANDS[/bold red]")
             for c, desc in UI_COMMANDS.items():
                 feed.add_message("system", f"  [cyan]{c:<16}[/cyan] {desc}")
+            feed.add_message("system", "")
+            feed.add_message("system", "[bold red]FILE REFERENCES[/bold red]")
+            feed.add_message("system", "  Use [cyan]#filepath[/cyan] to attach files to your query")
+            feed.add_message("system", "  Example: [dim]explain this code #main.py[/dim]")
             feed.add_message("system", "─" * 60)
 
         elif cmd == "/clear":
@@ -773,7 +857,7 @@ class RedShinobiApp(App):
             feed.add_message("system", "─" * 60)
 
         elif cmd == "/save":
-            self._save_transcript()
+            self._save_transcript(args.strip() if args else None)
 
         elif cmd == "/key":
             if args:
@@ -811,15 +895,19 @@ class RedShinobiApp(App):
                 else:
                     feed.add_message("error", f"Model '{model_to_remove}' not found in catalog")
             else:
-                feed.add_message("system", "Usage: /erasemodel <model_id>")
-                feed.add_message("system", "Use /models to see available models")
-
-        elif cmd == "/file":
-            if args:
-                await self._handle_file_query(args)
-            else:
-                feed.add_message("system", "Usage: /file <path> [question]")
-                feed.add_message("system", "Query a file with AI assistance")
+                if self._model_names and not self._model_names[0].startswith("(no models"):
+                    erase_options = ["all", "failed"] + self._model_names
+                    overlay = self.query_one("#selection-overlay", SelectionOverlay)
+                    overlay.show_options(
+                        erase_options,
+                        ["" for _ in erase_options],
+                        selection_type="model",
+                        on_select=lambda m: self._on_erase_selected(m)
+                    )
+                    self._selection_active = True
+                    feed.add_message("system", "[bold red]SELECT MODEL TO ERASE[/bold red] — use ↑↓ and Enter, Esc to cancel")
+                else:
+                    feed.add_message("system", "Catalog is empty")
 
         elif cmd == "/read":
             if args:
@@ -840,48 +928,77 @@ class RedShinobiApp(App):
             feed.add_message("system", "─" * 60)
 
         elif cmd == "/mcp-disconnect":
-            if self.mcp_manager:
+            if not self.mcp_manager:
+                feed.add_message("system", "No MCP manager available")
+            elif args:
                 try:
-                    if args:
-                        await self.mcp_manager.disconnect(args)
-                        feed.add_message("system", f"[green]✓[/green] Disconnected from {args}")
-                    else:
-                        await self.mcp_manager.cleanup()
-                        feed.add_message("system", "[green]✓[/green] Disconnected all MCP servers")
+                    await self.mcp_manager.disconnect_server(args.strip())
+                    feed.add_message("system", f"[green]✓[/green] Disconnected from {args.strip()}")
                     self._sync_status()
                 except Exception as e:
                     feed.add_message("error", f"Disconnect failed: {e}")
             else:
-                feed.add_message("system", "No MCP manager available")
+                try:
+                    servers = self.mcp_manager.list_servers()
+                    if not servers:
+                        feed.add_message("system", "No MCP servers connected")
+                    else:
+                        server_names = [s["name"] for s in servers]
+                        options = ["← Cancel"] + server_names
+                        overlay = self.query_one("#selection-overlay", SelectionOverlay)
+                        overlay.show_options(
+                            options,
+                            ["" for _ in options],
+                            selection_type="command",
+                            on_select=lambda s: self._on_mcp_disconnect_selected(s)
+                        )
+                        self._selection_active = True
+                        feed.add_message("system", "[bold red]SELECT SERVER TO DISCONNECT[/bold red] — use ↑↓ and Enter, Esc to cancel")
+                except Exception as e:
+                    feed.add_message("error", f"Error listing servers: {e}")
 
         elif cmd == "/system":
             if args:
-                self._system_prompt = args
-                feed.add_message("system", f"[green]✓[/green] System prompt updated")
-                feed.add_message("system", f"[dim]{args[:100]}{'...' if len(args) > 100 else ''}[/dim]")
-            else:
-                if hasattr(self, '_system_prompt') and self._system_prompt:
-                    feed.add_message("system", f"Current system prompt: {self._system_prompt}")
+                # args format: "<model> <prompt>" — set prompt for specific model
+                parts = args.split(maxsplit=1)
+                if len(parts) == 2:
+                    self._system_prompt = parts[1]
+                    feed.add_message("system", f"[green]✓[/green] System prompt updated for {parts[0]}")
                 else:
-                    feed.add_message("system", "No system prompt set. Usage: /system <prompt>")
+                    # Single arg treated as the prompt for current model
+                    self._system_prompt = args
+                    feed.add_message("system", f"[green]✓[/green] System prompt updated")
+                feed.add_message("system", f"[dim]{self._system_prompt[:100]}{'...' if len(self._system_prompt) > 100 else ''}[/dim]")
+            else:
+                if self._model_names and not self._model_names[0].startswith("(no models"):
+                    overlay = self.query_one("#selection-overlay", SelectionOverlay)
+                    overlay.show_options(
+                        self._model_names,
+                        ["" for _ in self._model_names],
+                        selection_type="model",
+                        on_select=lambda m: self._on_system_model_selected(m)
+                    )
+                    self._selection_active = True
+                    feed.add_message("system", "[bold red]SELECT MODEL FOR SYSTEM PROMPT[/bold red] — use ↑↓ and Enter, Esc to cancel")
+                else:
+                    feed.add_message("system", "No models in catalog. Run /key first.")
 
         elif cmd == "/info":
-            feed.add_message("system", "─" * 60)
-            feed.add_message("system", "[bold red]MODEL INFO[/bold red]")
-            feed.add_message("system", f"Current: [bold]{self.current_model}[/bold]")
-            if self.current_model in self._model_catalog:
-                info = self._model_catalog[self.current_model]
-                feed.add_message("system", f"  Provider: {info.get('endpoint_type', 'unknown')}")
-                feed.add_message("system", f"  API Key: {info.get('api_key_env', 'N/A')}")
-                if info.get('ok') is True:
-                    feed.add_message("system", f"  Status: [green]Verified[/green] ({info.get('latency_ms', '?')}ms)")
-                elif info.get('ok') is False:
-                    feed.add_message("system", f"  Status: [red]Failed[/red] - {info.get('error', 'unknown')}")
-                else:
-                    feed.add_message("system", "  Status: [yellow]Not verified[/yellow]")
+            if args:
+                self._show_model_info(args.strip())
             else:
-                feed.add_message("system", "  [dim]Model not in catalog[/dim]")
-            feed.add_message("system", "─" * 60)
+                if self._model_names and not self._model_names[0].startswith("(no models"):
+                    overlay = self.query_one("#selection-overlay", SelectionOverlay)
+                    overlay.show_options(
+                        self._model_names,
+                        ["" for _ in self._model_names],
+                        selection_type="model",
+                        on_select=lambda m: self._on_info_selected(m)
+                    )
+                    self._selection_active = True
+                    feed.add_message("system", "[bold red]SELECT MODEL TO INSPECT[/bold red] — use ↑↓ and Enter, Esc to cancel")
+                else:
+                    feed.add_message("system", "No models in catalog. Run /key first.")
 
         else:
             feed.add_message("error", f"unknown command: {cmd}  — type /help")
@@ -892,13 +1009,61 @@ class RedShinobiApp(App):
         feed = self.query_one("#feed", ChatFeed)
 
         if self.current_model in ("<no-model>", "<no models — run /key>"):
-            feed.add_message("error", "no model selected — use /key then /set <name>")
+            feed.add_message("error", "no model selected — use /key then /set")
             return
 
-        feed.add_message("user", text)
-        self._history.append({"role": "user", "content": text})
+        # Process # file references
+        processed_text = text
+        if "#" in text:
+            import re
+            import os
+            
+            # Find all #filepath patterns
+            file_refs = re.findall(r'#([^\s]+)', text)
+            
+            if file_refs:
+                file_contents = []
+                for file_path in file_refs:
+                    if os.path.exists(file_path):
+                        try:
+                            with open(file_path, "r", encoding="utf-8") as f:
+                                content = f.read()
+                            
+                            # Truncate very large files
+                            max_chars = 50000
+                            if len(content) > max_chars:
+                                content = content[:max_chars] + f"\n\n[... truncated at {max_chars} characters ...]"
+                                feed.add_message("system", f"[dim]Note: {file_path} truncated to {max_chars} chars[/dim]")
+                            
+                            file_contents.append(f"\n\n--- File: {file_path} ---\n```\n{content}\n```\n")
+                            feed.add_message("system", f"[dim]📎 Attached: {file_path}[/dim]")
+                        except UnicodeDecodeError:
+                            try:
+                                with open(file_path, "r", encoding="latin-1") as f:
+                                    content = f.read()
+                                file_contents.append(f"\n\n--- File: {file_path} ---\n```\n{content}\n```\n")
+                                feed.add_message("system", f"[dim]📎 Attached: {file_path}[/dim]")
+                            except Exception as e:
+                                feed.add_message("error", f"Could not read {file_path}: {e}")
+                        except Exception as e:
+                            feed.add_message("error", f"Could not read {file_path}: {e}")
+                    else:
+                        feed.add_message("error", f"File not found: {file_path}")
+                
+                # Remove #filepath from display, keep in processed version
+                display_text = re.sub(r'#[^\s]+', '', text).strip()
+                processed_text = display_text + "".join(file_contents)
+                
+                # Show user message without file paths
+                feed.add_message("user", display_text if display_text else text)
+            else:
+                feed.add_message("user", text)
+        else:
+            feed.add_message("user", text)
+        
+        self._history.append({"role": "user", "content": processed_text})
         self.is_thinking = True
-        self._run_brain(text)
+        self._run_brain(processed_text)
 
     @work(exclusive=False, thread=False)
     async def _run_brain(self, text: str) -> None:
@@ -911,6 +1076,7 @@ class RedShinobiApp(App):
                 mode="offline",
                 max_turns=2,
                 mcp_manager=self.mcp_manager,
+                chat_history=self._history,
             )
             for msg in conversation:
                 model = msg.get("model", self.current_model)
@@ -966,10 +1132,13 @@ class RedShinobiApp(App):
         except NoMatches:
             pass
 
-    def _save_transcript(self) -> None:
+    def _save_transcript(self, filename: str = None) -> None:
         feed = self.query_one("#feed", ChatFeed)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        fname = f"red_shinobi_{ts}.md"
+        if filename:
+            fname = filename if filename.endswith(".md") else filename + ".md"
+        else:
+            fname = f"red_shinobi_{ts}.md"
         lines = [f"# RED SHINOBI transcript — {ts}\n"]
         for h in self._history:
             role = h.get("role", "?").upper()
