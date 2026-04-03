@@ -12,7 +12,6 @@ from typing import Optional, List, Dict, Any, Tuple, TYPE_CHECKING
 
 from openai import AsyncOpenAI, RateLimitError, APIError
 from rich.console import Console
-from rich import print as rprint
 
 from red_shinobi.core import config
 from red_shinobi.core.nvidia_catalog import MODEL_CATALOG
@@ -170,7 +169,7 @@ def normalize_model_name(model_name: str) -> Optional[str]:
 
 def extract_mentioned_model(text: str) -> Optional[str]:
     """Extract first valid @ModelName from text."""
-    pattern = r'@([\w\-\.]+)'
+    pattern = r'@([\w\-\./]+)'
     matches = re.findall(pattern, text)
     for match in matches:
         normalized = normalize_model_name(match)
@@ -362,9 +361,6 @@ async def chat_worker(
         
         tools = await get_mcp_tools_for_llm(mcp_manager)
         
-        # ===== DEBUG WIRETAP =====
-        rprint(f"[bold yellow]DEBUG: Passing {len(tools) if tools else 0} tools to {model_name}[/bold yellow]")
-        
         api_kwargs: Dict[str, Any] = {
             "model": model_name,  # Use the catalog model_id directly
             "messages": messages,
@@ -422,7 +418,7 @@ async def chat_worker(
                 console.print(f"[dim]  ✓ Done[/dim]")
             
             followup_kwargs: Dict[str, Any] = {
-                "model": model_info["api_model_id"],
+                "model": model_name,
                 "messages": messages,
                 "temperature": TEMPERATURE,
                 "max_tokens": MAX_TOKENS
@@ -479,7 +475,8 @@ async def run_agent_conversation(
     active_models: Optional[List[str]] = None,
     mode: str = "offline",
     max_turns: int = 2,
-    mcp_manager: Optional["MCPManager"] = None
+    mcp_manager: Optional["MCPManager"] = None,
+    chat_history: Optional[List[Dict[str, Any]]] = None
 ) -> List[Dict[str, Any]]:
     """
     Strict 1-on-1 conversation with optional single handoff.
@@ -504,7 +501,7 @@ async def run_agent_conversation(
     if not active_models or len(active_models) == 0:
         return [{
             "role": "assistant",
-            "content": "No model selected. Set API key with /key, then run /models refresh and /model <id>.",
+            "content": "No model selected. Set API key with /key, then run /models refresh and /set <id>.",
             "model": "system"
         }]
     
@@ -520,7 +517,7 @@ async def run_agent_conversation(
     response1 = await chat_worker(
         model_name=first_model,
         prompt=task,
-        chat_history=None,
+        chat_history=chat_history,
         mcp_manager=mcp_manager
     )
     

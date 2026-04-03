@@ -220,15 +220,14 @@ async def execute(
             console.print(f"[dim]NVIDIA API key already configured[/dim]")
         
         # Model adding loop
-        console.print(f"\n[dim]NVIDIA key ready. Type a model name to add (or leave blank to skip):[/dim]")
+        console.print(f"\n[dim]NVIDIA key ready. Add your first model:[/dim]")
         
         while True:
             model_name = await session.prompt_async("model name > ")
             model_name = model_name.strip()
             
             if not model_name:
-                console.print(f"[green][ok] Done[/green]\n")
-                break
+                continue
             
             # Test model by calling NVIDIA endpoint (two-step verification)
             console.print(f"[dim]Testing model '{model_name}'...[/dim]")
@@ -299,7 +298,14 @@ async def execute(
             except Exception as e:
                 console.print(f"[{ACCENT_COLOR}][x] Error testing model: {str(e)}[/{ACCENT_COLOR}]")
             
-            console.print(f"\n[dim]Add another model? (type name or leave blank to finish):[/dim]")
+            next_action = await arrow_select(
+                "What next?",
+                ["Add another model", "Done"]
+            )
+
+            if next_action is None or next_action == "Done":
+                console.print(f"[green][ok] Done[/green]\n")
+                break
     
     # OPENAI flow
     elif provider_name == "OPENAI":

@@ -36,7 +36,7 @@ UI_COMMANDS: Dict[str, str] = {
     "/help":           "Show all commands",
     "/key":            "Add API keys & models",
     "/models":         "List all models",
-    "/model":          "Switch model",
+    "/set":            "Switch model",
     "/refresh":        "Verify models work",
     "/erasemodel":     "Remove model",
     "/file":           "Query file with AI",
@@ -738,7 +738,7 @@ class RedShinobiApp(App):
                 feed.add_message("system", "  no models — run /key first")
             feed.add_message("system", "─" * 60)
 
-        elif cmd == "/model":
+        elif cmd == "/set":
             if args:
                 # fuzzy match
                 match = next(
@@ -892,7 +892,7 @@ class RedShinobiApp(App):
         feed = self.query_one("#feed", ChatFeed)
 
         if self.current_model in ("<no-model>", "<no models — run /key>"):
-            feed.add_message("error", "no model selected — use /key then /model <name>")
+            feed.add_message("error", "no model selected — use /key then /set <name>")
             return
 
         feed.add_message("user", text)

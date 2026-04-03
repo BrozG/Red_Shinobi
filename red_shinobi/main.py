@@ -31,10 +31,11 @@ from red_shinobi.commands import auth_cmds, mcp_cmds, model_cmds, file_cmds, era
 console = Console()
 mcp_manager = MCPManager()
 session_history: List[str] = []
+chat_history: List[Dict[str, Any]] = []
 
 # Current model state - CLI uses single model at a time
 # Can be a friendly name (from MODEL_REGISTRY) or a catalog model ID
-# None until user selects with /model
+# None until user selects with /set
 current_model: Optional[str] = None
 
 # Active model ID from catalog (None until /models refresh is run)
@@ -58,7 +59,7 @@ class RedShinobiCompleter(Completer):
     COMMANDS = [
         "/key",
         "/models",
-        "/model",
+        "/set",
         "/refresh",
         "/erasemodel",
         "/help",
@@ -154,7 +155,7 @@ def print_banner() -> None:
     console.print("[dim]────────────────────────────────────────────────────────[/dim]")
     model_display = current_model if current_model else "[yellow]<no-model>[/yellow]"
     console.print(f"[dim]Current Model:[/dim] {model_display}")
-    console.print("[dim]Quick start: /key → /models → /model @<name>[/dim]\n")
+    console.print("[dim]Quick start: /key → /models → /set @<name>[/dim]\n")
 
 
 # =============================================================================
@@ -171,7 +172,7 @@ def cmd_help() -> None:
 [bold]Setup & Model Management[/bold]
   /key              Add API keys and models
   /models           List all models in catalog
-  /model <id>       Select a model (use @ to autocomplete)
+  /set <id>         Select a model (use @ to autocomplete)
   /refresh          Verify models in catalog
   /erasemodel       Remove model(s) from catalog
 
@@ -181,9 +182,11 @@ def cmd_help() -> None:
   /save             Save conversation to markdown
 
 [bold]MCP Servers[/bold]
-  /mcp              Connect to MCP server
+  /mcp <name> <cmd> Connect MCP server via stdio
+                    e.g. /mcp github npx -y @modelcontextprotocol/server-github
+                    <name> = your label, <cmd> = shell command to launch server
   /mcp-list         Show connected servers
-  /mcp-disconnect   Disconnect server
+  /mcp-disconnect   Disconnect server (no arg = interactive picker)
 
 [bold]System[/bold]
   /chatbox          Launch graphical UI
@@ -198,7 +201,7 @@ def cmd_help() -> None:
 [dim]Quick Start:[/dim]
   [dim]1. /key → select provider → enter API key (models added automatically)[/dim]
   [dim]2. /models → see all available models[/dim]
-  [dim]3. /model <name> → start chatting (type @ to autocomplete)[/dim]
+  [dim]3. /set <name> → start chatting (type @ to autocomplete)[/dim]
   [dim]4. /refresh → verify models work (optional)[/dim]
 """
     console.print(help_text)
@@ -206,20 +209,23 @@ def cmd_help() -> None:
 
 def cmd_set_model(args: str) -> None:
     """
-    Set the current model. Usage: /set-model <model_id> or /model <model_id>
+    Set the current model. Usage: /set <model_id>
     
     Only accepts models from MODEL_CATALOG (discovered via /models refresh or /models add).
     """
     global current_model, active_model_id
     
     model_id = args.strip()
+    # Strip @ prefix if present (from autocomplete)
+    if model_id.startswith("@"):
+        model_id = model_id[1:]
     
     if not model_id:
         if current_model:
             console.print(f"[cyan]Current model: {current_model}[/cyan]")
         else:
             console.print("[yellow]No model selected.[/yellow]")
-        console.print("[dim]Usage: /model <model_id>[/dim]")
+        console.print("[dim]Usage: /set <model_id>[/dim]")
         if MODEL_CATALOG:
             console.print(f"[dim]Catalog: {len(MODEL_CATALOG)} models (run /models to see)[/dim]")
         else:
@@ -312,11 +318,12 @@ async def run_conversation(user_input: str) -> None:
         console.print("[dim]Quick start:[/dim]")
         console.print("[dim]  1. /key         - Add API key (models added automatically)[/dim]")
         console.print("[dim]  2. /models      - List available models[/dim]")
-        console.print("[dim]  3. /model @...  - Select a model (@ to autocomplete)[/dim]\n")
+        console.print("[dim]  3. /set @...    - Select a model (@ to autocomplete)[/dim]\n")
         return
     
     console.print(f"\n[dim]You:[/dim] {user_input}\n")
     session_history.append(f"**You:** {user_input}")
+    chat_history.append({"role": "user", "content": user_input})
     
     try:
         conversation = await brain.run_agent_conversation(
@@ -324,7 +331,8 @@ async def run_conversation(user_input: str) -> None:
             active_models=[current_model],
             mode="offline",
             max_turns=2,
-            mcp_manager=mcp_manager
+            mcp_manager=mcp_manager,
+            chat_history=chat_history
         )
         
         for message in conversation:
@@ -333,6 +341,7 @@ async def run_conversation(user_input: str) -> None:
             
             console.print(f"[{THEME_COLOR}]{model}:[/{THEME_COLOR}] {content}\n")
             session_history.append(f"**{model}:** {content}")
+            chat_history.append({"role": "assistant", "content": content})
             
     except Exception as e:
         console.print(f"[{ACCENT_COLOR}][x] Error: {e}[/{ACCENT_COLOR}]\n")
@@ -377,11 +386,13 @@ async def handle_command(user_input: str, session: PromptSession) -> bool:
         return False
     
     if cmd == "/clear":
+        global chat_history
+        chat_history = []
         os.system("cls" if os.name == "nt" else "clear")
         print_banner()
         return True
     
-    if cmd in ["/model", "/set-model"]:
+    if cmd == "/set":
         cmd_set_model(args)
         return True
     
@@ -412,9 +423,8 @@ async def main_loop() -> None:
     
     while True:
         try:
-            prompt_display = current_model[:15] if current_model else "&lt;no-model&gt;"
             user_input = await session.prompt_async(
-                HTML(f"<b><ansired>RedShinobi{prompt_display}></ansired></b> ")
+                HTML("<b><ansired>Red Shinobi</ansired></b> <ansibrightblack>›</ansibrightblack> ")
             )
             user_input = user_input.strip()
             

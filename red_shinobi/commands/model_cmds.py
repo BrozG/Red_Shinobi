@@ -19,6 +19,7 @@ from red_shinobi.core.nvidia_catalog import (
     verify_model,
     update_verification,
 )
+from red_shinobi.commands.auth_cmds import arrow_select
 
 console = Console()
 THEME_COLOR = "red"
@@ -123,25 +124,53 @@ async def system_execute(
         mcp_manager: The MCPManager instance
         session_history: The conversation history list
     """
-    parts = args.split(maxsplit=1)
-    if len(parts) < 2:
-        console.print(f"[{ACCENT_COLOR}][x] Usage: /system <model> <new_prompt>[/{ACCENT_COLOR}]")
+    # If no args, show interactive model picker then ask for prompt
+    if not args:
+        model_ids = list(MODEL_CATALOG.keys())
+        if not model_ids:
+            console.print(f"[{ACCENT_COLOR}][x] No models in catalog. Run /key first.[/{ACCENT_COLOR}]")
+            return
+
+        options = ["← Back"] + model_ids
+        chosen = await arrow_select(
+            "Select model to set system prompt for (↑↓ navigate, Enter confirm, Esc cancel):",
+            options
+        )
+
+        if chosen is None or chosen == "← Back":
+            console.print("[dim]Cancelled[/dim]")
+            return
+
+        model_name = chosen
+        console.print(f"[dim]Model: {model_name}[/dim]")
+        new_prompt = await session.prompt_async("New system prompt > ")
+        new_prompt = new_prompt.strip()
+        if not new_prompt:
+            console.print("[dim]Cancelled — prompt cannot be empty[/dim]")
+            return
+    else:
+        parts = args.split(maxsplit=1)
+        if len(parts) < 2:
+            console.print(f"[{ACCENT_COLOR}][x] Usage: /system <model> <new_prompt>[/{ACCENT_COLOR}]")
+            return
+        model_name = parts[0]
+        new_prompt = parts[1]
+    
+    if model_name not in MODEL_CATALOG and model_name not in brain.MODEL_REGISTRY:
+        console.print(f"[{ACCENT_COLOR}][x] Model '{model_name}' not found.[/{ACCENT_COLOR}]")
+        if MODEL_CATALOG:
+            console.print(f"[dim]Run /models to see {len(MODEL_CATALOG)} available models[/dim]")
         return
     
-    model_name = parts[0]
-    new_prompt = parts[1]
-    
+    # Create a MODEL_REGISTRY entry if the model only exists in catalog
     if model_name not in brain.MODEL_REGISTRY:
-        console.print(f"[{ACCENT_COLOR}][x] Model '{model_name}' not found[/{ACCENT_COLOR}]")
-        available = list(brain.MODEL_REGISTRY.keys())
-        if len(available) > 5:
-            displayed = available[:5] + [f"... and {len(available) - 5} more"]
-        else:
-            displayed = available
-        console.print(f"[dim]Available: {', '.join(displayed)}[/dim]")
-        return
+        brain.MODEL_REGISTRY[model_name] = {
+            "api_model_id": model_name,
+            "system_prompt": new_prompt
+        }
+    else:
+        brain.MODEL_REGISTRY[model_name]["system_prompt"] = new_prompt
     
-    brain.MODEL_REGISTRY[model_name]["system_prompt"] = new_prompt
     console.print(f"[green][ok] Updated system prompt for {model_name}[/green]\n")
 
 
@@ -164,19 +193,57 @@ async def info_execute(
         mcp_manager: The MCPManager instance
         session_history: The conversation history list
     """
+    # If no args, show interactive model picker
     if not args:
-        console.print(f"[{ACCENT_COLOR}][x] Usage: /info <model>[/{ACCENT_COLOR}]")
+        model_ids = list(MODEL_CATALOG.keys())
+        if not model_ids:
+            console.print(f"[{ACCENT_COLOR}][x] No models in catalog. Run /key first.[/{ACCENT_COLOR}]")
+            return
+
+        options = ["← Back"] + model_ids
+        chosen = await arrow_select(
+            "Select model to inspect (↑↓ navigate, Enter confirm, Esc cancel):",
+            options
+        )
+
+        if chosen is None or chosen == "← Back":
+            console.print("[dim]Cancelled[/dim]")
+            return
+
+        model_name = chosen
+    else:
+        model_name = args.strip()
+    
+    # Check MODEL_CATALOG first (covers all user-added models via /key)
+    if model_name in MODEL_CATALOG:
+        entry = MODEL_CATALOG[model_name]
+        console.print(f"\n[{THEME_COLOR}]Model: {model_name}[/{THEME_COLOR}]")
+        console.print(f"[dim]Endpoint : {entry.get('base_url', 'N/A')}[/dim]")
+        console.print(f"[dim]Key env  : {entry.get('api_key_env', 'N/A')}[/dim]")
+        console.print(f"[dim]Type     : {entry.get('endpoint_type', 'N/A')}[/dim]")
+        ok = entry.get("ok")
+        if ok is True:
+            console.print(f"[dim]Status   : [green]verified ({entry.get('latency_ms')}ms)[/green][/dim]")
+        elif ok is False:
+            console.print(f"[dim]Status   : [red]failed — {entry.get('error', '')}[/red][/dim]")
+        else:
+            console.print(f"[dim]Status   : not yet verified (run /refresh)[/dim]")
+        if model_name in brain.MODEL_REGISTRY:
+            sp = brain.MODEL_REGISTRY[model_name].get("system_prompt", "")
+            if sp:
+                console.print(f"\n[{THEME_COLOR}]System Prompt:[/{THEME_COLOR}]")
+                console.print(f"[dim]{sp}[/dim]")
+        console.print()
         return
     
-    model_name = args.strip()
-    
-    if model_name not in brain.MODEL_REGISTRY:
-        console.print(f"[{ACCENT_COLOR}][x] Model '{model_name}' not found[/{ACCENT_COLOR}]")
+    # Fallback: legacy hardcoded MODEL_REGISTRY entries
+    if model_name in brain.MODEL_REGISTRY:
+        model_info = brain.MODEL_REGISTRY[model_name]
+        console.print(f"\n[{THEME_COLOR}]Model: {model_name}[/{THEME_COLOR}]")
+        console.print(f"[dim]API ID: {model_info.get('api_model_id', 'N/A')}[/dim]")
+        console.print(f"\n[{THEME_COLOR}]System Prompt:[/{THEME_COLOR}]")
+        console.print(f"[dim]{model_info.get('system_prompt', 'No prompt set')}[/dim]\n")
         return
     
-    model_info = brain.MODEL_REGISTRY[model_name]
-    
-    console.print(f"\n[{THEME_COLOR}]Model: {model_name}[/{THEME_COLOR}]")
-    console.print(f"[dim]API ID: {model_info.get('api_model_id', 'N/A')}[/dim]")
-    console.print(f"\n[{THEME_COLOR}]System Prompt:[/{THEME_COLOR}]")
-    console.print(f"[dim]{model_info.get('system_prompt', 'No prompt set')}[/dim]\n")
+    console.print(f"[{ACCENT_COLOR}][x] Model '{model_name}' not found.[/{ACCENT_COLOR}]")
+    console.print(f"[dim]Run /models to see available models[/dim]\n")
