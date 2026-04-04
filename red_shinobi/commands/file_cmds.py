@@ -13,6 +13,7 @@ from prompt_toolkit import PromptSession
 from red_shinobi.core import brain
 from red_shinobi.core.mcp_client import MCPManager
 from red_shinobi.commands.model_cmds import get_available_models
+from prompt_toolkit.completion import PathCompleter
 
 console = Console()
 THEME_COLOR = "red"
@@ -41,13 +42,29 @@ async def execute(
         mcp_manager: The MCPManager instance
         session_history: The conversation history list
     """
-    parts = args.split(maxsplit=1)
-    if len(parts) < 2:
-        console.print(f"[{ACCENT_COLOR}][x] Usage: /file <path> <query>[/{ACCENT_COLOR}]")
-        return
-    
-    file_path = parts[0]
-    query = parts[1]
+    if not args or len(args.split(maxsplit=1)) < 2:
+        console.print("[dim]Tab-complete file paths. Press Enter when done.[/dim]")
+        try:
+            file_path = await session.prompt_async(
+                "file path > ",
+                completer=PathCompleter(only_directories=False, expanduser=True)
+            )
+            file_path = file_path.strip()
+            if not file_path:
+                console.print("[dim]Cancelled[/dim]")
+                return
+            query = await session.prompt_async("query > ")
+            query = query.strip()
+            if not query:
+                console.print("[dim]Cancelled — query cannot be empty[/dim]")
+                return
+        except KeyboardInterrupt:
+            console.print("[dim]Cancelled[/dim]")
+            return
+    else:
+        parts = args.split(maxsplit=1)
+        file_path = parts[0]
+        query = parts[1]
     
     if not os.path.exists(file_path):
         console.print(f"[{ACCENT_COLOR}][x] File not found: {file_path}[/{ACCENT_COLOR}]")
@@ -86,8 +103,7 @@ async def execute(
     try:
         response = await brain.chat_worker(
             model_name=first_model,
-            prompt=full_prompt,
-            mode="offline"
+            prompt=full_prompt
         )
         console.print(f"[{THEME_COLOR}]{first_model}:[/{THEME_COLOR}] {response}\n")
         session_history.append(f"**File Query ({file_path}):** {query}")
@@ -158,10 +174,21 @@ async def read_execute(
         session_history: The conversation history list
     """
     if not args:
-        console.print(f"[{ACCENT_COLOR}][x] Usage: /read <path>[/{ACCENT_COLOR}]")
-        return
-    
-    file_path = args.strip()
+        console.print("[dim]Tab-complete file paths. Press Enter when done.[/dim]")
+        try:
+            file_path = await session.prompt_async(
+                "file path > ",
+                completer=PathCompleter(only_directories=False, expanduser=True)
+            )
+            file_path = file_path.strip()
+            if not file_path:
+                console.print("[dim]Cancelled[/dim]")
+                return
+        except KeyboardInterrupt:
+            console.print("[dim]Cancelled[/dim]")
+            return
+    else:
+        file_path = args.strip()
     
     if not os.path.exists(file_path):
         console.print(f"[{ACCENT_COLOR}][x] File not found: {file_path}[/{ACCENT_COLOR}]")

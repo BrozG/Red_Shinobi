@@ -5,7 +5,7 @@ Handles API keys and environment variable loading for all AI providers.
 """
 
 import os
-from dotenv import load_dotenv
+from dotenv import load_dotenv, dotenv_values
 
 load_dotenv()
 
@@ -76,7 +76,8 @@ def get_key(provider_name: str) -> str:
 
 def get_env_key(env_name: str, default: str = None) -> str:
     """
-    Get an environment variable value, with optional default.
+    Get an environment variable value directly from .env file.
+    This reads fresh values, not cached os.environ.
     
     Args:
         env_name: Name of the environment variable
@@ -85,12 +86,26 @@ def get_env_key(env_name: str, default: str = None) -> str:
     Returns:
         The environment variable value or default
     """
+    # Read directly from .env file to get fresh values
+    env_path = ".env"
+    if os.path.exists(env_path):
+        env_values = dotenv_values(env_path)
+        value = env_values.get(env_name)
+        if value:
+            return value
     return os.getenv(env_name, default)
 
 
 def reload_keys():
-    """Reload API keys from environment after .env changes."""
-    load_dotenv(override=True)
-    API_KEYS["nvidia"] = os.getenv("NVIDIA_API_KEY")
-    API_KEYS["openai"] = os.getenv("OPENAI_API_KEY")
-    API_KEYS["anthropic"] = os.getenv("ANTHROPIC_API_KEY")
+    """Reload API keys from .env file after changes."""
+    env_path = ".env"
+    if os.path.exists(env_path):
+        env_values = dotenv_values(env_path)
+        API_KEYS["nvidia"] = env_values.get("NVIDIA_API_KEY") or os.getenv("NVIDIA_API_KEY")
+        API_KEYS["openai"] = env_values.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+        API_KEYS["anthropic"] = env_values.get("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
+    else:
+        load_dotenv(override=True)
+        API_KEYS["nvidia"] = os.getenv("NVIDIA_API_KEY")
+        API_KEYS["openai"] = os.getenv("OPENAI_API_KEY")
+        API_KEYS["anthropic"] = os.getenv("ANTHROPIC_API_KEY")

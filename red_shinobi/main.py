@@ -23,6 +23,7 @@ from red_shinobi.core.mcp_client import MCPManager
 from red_shinobi.core.config import reload_keys
 from red_shinobi.core.nvidia_catalog import MODEL_CATALOG, get_first_working_model
 from red_shinobi.commands import auth_cmds, mcp_cmds, model_cmds, file_cmds, erasemodel_cmds, refresh_cmds
+from red_shinobi.commands.auth_cmds import arrow_select
 
 # =============================================================================
 # GLOBAL INSTANCES
@@ -31,10 +32,11 @@ from red_shinobi.commands import auth_cmds, mcp_cmds, model_cmds, file_cmds, era
 console = Console()
 mcp_manager = MCPManager()
 session_history: List[str] = []
+chat_history: List[Dict[str, Any]] = []
 
 # Current model state - CLI uses single model at a time
 # Can be a friendly name (from MODEL_REGISTRY) or a catalog model ID
-# None until user selects with /model
+# None until user selects with /set
 current_model: Optional[str] = None
 
 # Active model ID from catalog (None until /models refresh is run)
@@ -58,14 +60,13 @@ class RedShinobiCompleter(Completer):
     COMMANDS = [
         "/key",
         "/models",
-        "/model",
+        "/set",
         "/refresh",
         "/erasemodel",
         "/help",
         "/clear",
         "/save",
         "/chatbox",
-        "/file",
         "/system",
         "/mcp",
         "/mcp-list",
@@ -79,8 +80,28 @@ class RedShinobiCompleter(Completer):
         """Generate completions based on current input."""
         text = document.text_before_cursor
         
+        # File completion with #
+        if "#" in text:
+            # Get the part after the last #
+            hash_index = text.rfind("#")
+            prefix = text[hash_index + 1:]
+            
+            # Complete with file paths
+            from prompt_toolkit.completion import PathCompleter
+            path_completer = PathCompleter(only_directories=False, expanduser=True)
+            
+            # Create a fake document for path completer
+            fake_doc = Document(prefix, len(prefix))
+            for completion in path_completer.get_completions(fake_doc, complete_event):
+                yield Completion(
+                    completion.text,
+                    start_position=completion.start_position,
+                    display=f"#{completion.display or completion.text}",
+                    display_meta="file"
+                )
+        
         # Model completion with @
-        if "@" in text:
+        elif "@" in text:
             # Get the part after the last @
             at_index = text.rfind("@")
             prefix = text[at_index + 1:]
@@ -154,7 +175,8 @@ def print_banner() -> None:
     console.print("[dim]────────────────────────────────────────────────────────[/dim]")
     model_display = current_model if current_model else "[yellow]<no-model>[/yellow]"
     console.print(f"[dim]Current Model:[/dim] {model_display}")
-    console.print("[dim]Quick start: /key → /models → /model @<name>[/dim]\n")
+    console.print("[dim]Quick start: /key → /set @<name> → ask anything[/dim]")
+    console.print("[dim]Use #filepath to attach files (e.g., 'explain #main.py')[/dim]\n")
 
 
 # =============================================================================
@@ -171,19 +193,21 @@ def cmd_help() -> None:
 [bold]Setup & Model Management[/bold]
   /key              Add API keys and models
   /models           List all models in catalog
-  /model <id>       Select a model (use @ to autocomplete)
+  /set <id>         Select a model (use @ to autocomplete)
   /refresh          Verify models in catalog
   /erasemodel       Remove model(s) from catalog
 
 [bold]Chat & Files[/bold]
-  /file <path>      Query a file with AI
+  #<filepath>       Attach file to query (e.g., "explain #main.py")
   /read <path>      Display file contents
   /save             Save conversation to markdown
 
 [bold]MCP Servers[/bold]
-  /mcp              Connect to MCP server
+  /mcp <name> <cmd> Connect MCP server via stdio
+                    e.g. /mcp github npx -y @modelcontextprotocol/server-github
+                    <name> = your label, <cmd> = shell command to launch server
   /mcp-list         Show connected servers
-  /mcp-disconnect   Disconnect server
+  /mcp-disconnect   Disconnect server (no arg = interactive picker)
 
 [bold]System[/bold]
   /chatbox          Launch graphical UI
@@ -198,33 +222,41 @@ def cmd_help() -> None:
 [dim]Quick Start:[/dim]
   [dim]1. /key → select provider → enter API key (models added automatically)[/dim]
   [dim]2. /models → see all available models[/dim]
-  [dim]3. /model <name> → start chatting (type @ to autocomplete)[/dim]
-  [dim]4. /refresh → verify models work (optional)[/dim]
+  [dim]3. /set <name> → start chatting (type @ to autocomplete)[/dim]
+  [dim]4. Use #file.py to attach files to your queries[/dim]
 """
     console.print(help_text)
 
 
-def cmd_set_model(args: str) -> None:
+async def cmd_set_model(args: str, session: PromptSession = None) -> None:
     """
-    Set the current model. Usage: /set-model <model_id> or /model <model_id>
+    Set the current model. Usage: /set <model_id>
     
-    Only accepts models from MODEL_CATALOG (discovered via /models refresh or /models add).
+    When called with no argument, shows an interactive arrow-key catalog picker.
+    Only accepts models from MODEL_CATALOG (discovered via /key).
     """
     global current_model, active_model_id
     
     model_id = args.strip()
+    # Strip @ prefix if present (from autocomplete)
+    if model_id.startswith("@"):
+        model_id = model_id[1:]
     
     if not model_id:
-        if current_model:
-            console.print(f"[cyan]Current model: {current_model}[/cyan]")
-        else:
-            console.print("[yellow]No model selected.[/yellow]")
-        console.print("[dim]Usage: /model <model_id>[/dim]")
-        if MODEL_CATALOG:
-            console.print(f"[dim]Catalog: {len(MODEL_CATALOG)} models (run /models to see)[/dim]")
-        else:
-            console.print("[dim]Run /models refresh to discover models[/dim]")
-        return
+        if not MODEL_CATALOG:
+            console.print("[yellow]No models in catalog. Run /key first.[/yellow]")
+            return
+
+        chosen = await arrow_select(
+            "Select model (↑↓ navigate, Enter confirm, Esc cancel):",
+            list(MODEL_CATALOG.keys())
+        )
+
+        if chosen is None:
+            console.print("[dim]Cancelled[/dim]")
+            return
+
+        model_id = chosen
     
     # Check MODEL_CATALOG only
     if model_id not in MODEL_CATALOG:
@@ -303,6 +335,9 @@ async def run_conversation(user_input: str) -> None:
     """
     Run 1-on-1 conversation using current_model.
     Passes [current_model] as single-element list to brain.
+    
+    Supports # syntax for file references:
+        Example: "Explain this code #main.py"
     """
     global current_model
     
@@ -312,19 +347,64 @@ async def run_conversation(user_input: str) -> None:
         console.print("[dim]Quick start:[/dim]")
         console.print("[dim]  1. /key         - Add API key (models added automatically)[/dim]")
         console.print("[dim]  2. /models      - List available models[/dim]")
-        console.print("[dim]  3. /model @...  - Select a model (@ to autocomplete)[/dim]\n")
+        console.print("[dim]  3. /set @...    - Select a model (@ to autocomplete)[/dim]\n")
         return
+    
+    # Process # file references
+    processed_input = user_input
+    if "#" in user_input:
+        import re
+        
+        # Find all #filepath patterns (word boundaries or paths)
+        # Matches: #file.py, #path/to/file.txt, etc.
+        file_refs = re.findall(r'#([^\s]+)', user_input)
+        
+        if file_refs:
+            file_contents = []
+            for file_path in file_refs:
+                if os.path.exists(file_path):
+                    try:
+                        with open(file_path, "r", encoding="utf-8") as f:
+                            content = f.read()
+                        
+                        # Truncate very large files
+                        max_chars = 50000
+                        if len(content) > max_chars:
+                            content = content[:max_chars] + f"\n\n[... truncated at {max_chars} characters ...]"
+                            console.print(f"[dim]Note: {file_path} truncated to {max_chars} characters[/dim]")
+                        
+                        file_contents.append(f"\n\n--- File: {file_path} ---\n```\n{content}\n```\n")
+                        console.print(f"[dim]Attached file: {file_path}[/dim]")
+                    except UnicodeDecodeError:
+                        try:
+                            with open(file_path, "r", encoding="latin-1") as f:
+                                content = f.read()
+                            file_contents.append(f"\n\n--- File: {file_path} ---\n```\n{content}\n```\n")
+                            console.print(f"[dim]Attached file: {file_path}[/dim]")
+                        except Exception as e:
+                            console.print(f"[yellow]⚠ Could not read {file_path}: {e}[/yellow]")
+                    except Exception as e:
+                        console.print(f"[yellow]⚠ Could not read {file_path}: {e}[/yellow]")
+                else:
+                    console.print(f"[yellow]⚠ File not found: {file_path}[/yellow]")
+            
+            # Remove #filepath from the user message and append file contents
+            processed_input = re.sub(r'#[^\s]+', '', user_input).strip()
+            if file_contents:
+                processed_input += "".join(file_contents)
     
     console.print(f"\n[dim]You:[/dim] {user_input}\n")
     session_history.append(f"**You:** {user_input}")
+    chat_history.append({"role": "user", "content": processed_input})
     
     try:
         conversation = await brain.run_agent_conversation(
-            task=user_input,
+            task=processed_input,
             active_models=[current_model],
             mode="offline",
             max_turns=2,
-            mcp_manager=mcp_manager
+            mcp_manager=mcp_manager,
+            chat_history=chat_history
         )
         
         for message in conversation:
@@ -333,6 +413,7 @@ async def run_conversation(user_input: str) -> None:
             
             console.print(f"[{THEME_COLOR}]{model}:[/{THEME_COLOR}] {content}\n")
             session_history.append(f"**{model}:** {content}")
+            chat_history.append({"role": "assistant", "content": content})
             
     except Exception as e:
         console.print(f"[{ACCENT_COLOR}][x] Error: {e}[/{ACCENT_COLOR}]\n")
@@ -350,7 +431,6 @@ COMMAND_REGISTRY: Dict[str, Callable[..., Awaitable[None]]] = {
     "/refresh": refresh_cmds.execute,
     "/system": model_cmds.system_execute,
     "/info": model_cmds.info_execute,
-    "/file": file_cmds.execute,
     "/save": file_cmds.save_execute,
     "/read": file_cmds.read_execute,
     "/mcp": mcp_cmds.execute,
@@ -377,12 +457,14 @@ async def handle_command(user_input: str, session: PromptSession) -> bool:
         return False
     
     if cmd == "/clear":
+        global chat_history
+        chat_history = []
         os.system("cls" if os.name == "nt" else "clear")
         print_banner()
         return True
     
-    if cmd in ["/model", "/set-model"]:
-        cmd_set_model(args)
+    if cmd in ["/set"]:
+        await cmd_set_model(args, session)
         return True
     
     if cmd in SYNC_COMMANDS:
@@ -412,9 +494,8 @@ async def main_loop() -> None:
     
     while True:
         try:
-            prompt_display = current_model[:15] if current_model else "&lt;no-model&gt;"
             user_input = await session.prompt_async(
-                HTML(f"<b><ansired>RedShinobi{prompt_display}></ansired></b> ")
+                HTML("<b><ansired>Red Shinobi</ansired></b> <ansibrightblack>›</ansibrightblack> ")
             )
             user_input = user_input.strip()
             

@@ -9,6 +9,7 @@ from prompt_toolkit import PromptSession
 
 from red_shinobi.core.nvidia_catalog import MODEL_CATALOG, clear_catalog
 from red_shinobi.core.mcp_client import MCPManager
+from red_shinobi.commands.auth_cmds import arrow_select
 
 console = Console()
 THEME_COLOR = "red"
@@ -36,11 +37,26 @@ async def execute(
         mcp_manager: The MCPManager instance
         session_history: The conversation history list
     """
+    # If no args, show interactive picker
     if not args:
-        console.print(f"[{ACCENT_COLOR}][x] Usage: /erasemodel <model_name> | all | failed[/{ACCENT_COLOR}]")
-        return
-    
-    model_name = args.strip()
+        model_ids = list(MODEL_CATALOG.keys())
+        if not model_ids:
+            console.print(f"[{ACCENT_COLOR}][x] Catalog is empty.[/{ACCENT_COLOR}]\n")
+            return
+
+        options = ["← Back", "all", "failed"] + model_ids
+        chosen = await arrow_select(
+            "Select model to erase (↑↓ navigate, Enter confirm, Esc cancel):",
+            options
+        )
+
+        if chosen is None or chosen == "← Back":
+            console.print("[dim]Cancelled[/dim]")
+            return
+
+        model_name = chosen
+    else:
+        model_name = args.strip()
     
     if model_name.lower() == "all":
         # Clear entire catalog

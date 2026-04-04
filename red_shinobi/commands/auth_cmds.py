@@ -8,7 +8,7 @@ import os
 from typing import Optional
 
 import httpx
-from dotenv import set_key, load_dotenv
+from dotenv import set_key, load_dotenv, dotenv_values
 from openai import OpenAI, AuthenticationError
 from rich.console import Console
 from prompt_toolkit import PromptSession
@@ -36,59 +36,18 @@ def check_api_keys() -> None:
     console.print(f"\n[{THEME_COLOR}]API Key Status:[/{THEME_COLOR}]")
     providers = ["NVIDIA", "OPENAI", "ANTHROPIC"]
     status_symbols = []
+    
+    # Read fresh values from .env file
+    env_values = dotenv_values(".env") if os.path.exists(".env") else {}
+    
     for provider in providers:
-        key = os.getenv(f"{provider}_API_KEY")
+        key = env_values.get(f"{provider}_API_KEY")
         if key:
             status_symbols.append(f"[green]{provider} [/green][dim]|[/dim]")
         else:
             status_symbols.append(f"[dim]{provider}[/dim] [dim]|[/dim]")
     console.print(" ".join(status_symbols).rstrip(" [dim]|[/dim]"))
     console.print()
-
-
-def verify_api_key(provider: str, key: str) -> tuple:
-    """
-    Verify an API key by making a real request to the provider's servers.
-    
-    Args:
-        provider: Provider name (NVIDIA, OPENAI, ANTHROPIC)
-        key: The API key to verify
-    
-    Returns:
-        tuple: (is_valid: bool, message: str)
-    """
-    try:
-        if provider == "NVIDIA":
-            client = OpenAI(api_key=key, base_url="https://integrate.api.nvidia.com/v1")
-            try:
-                client.models.list()
-                return True, "Valid"
-            except AuthenticationError:
-                return False, "Invalid API Key"
-            except Exception as e:
-                return False, f"Connection error: {str(e)}"
-        
-        elif provider == "OPENAI":
-            client = OpenAI(api_key=key)
-            try:
-                client.models.list()
-                return True, "Valid"
-            except AuthenticationError:
-                return False, "Invalid API Key"
-            except Exception as e:
-                return False, f"Connection error: {str(e)}"
-        
-        elif provider == "ANTHROPIC":
-            if key.startswith("sk-ant-"):
-                return True, "Format valid"
-            else:
-                return False, "Must start with sk-ant-"
-        
-        else:
-            return True, "OK"
-    
-    except Exception as e:
-        return False, f"Error: {str(e)}"
 
 
 async def arrow_select(prompt_text: str, options: list[str]) -> Optional[str]:
@@ -168,19 +127,16 @@ async def execute(
     """
     Execute the /key command.
     Prompts user to select a provider and enter their API key.
-    Verifies the key and saves to .env file.
-    
-    Args:
-        args: Command arguments (unused for /key)
-        session: The PromptSession instance
-        mcp_manager: The MCPManager instance
-        session_history: The conversation history list
+    Saves to .env file.
     """
-    console.print(f"\n[{THEME_COLOR}]Select Provider:[/{THEME_COLOR}]")
+    console.print(f"\n[{THEME_COLOR}]API Key Management:[/{THEME_COLOR}]")
+    
+    # Build menu options
+    options = ["NVIDIA", "OPENAI", "ANTHROPIC", "Custom", "Update Existing Key"]
     
     provider_name = await arrow_select(
-        "Use arrow keys to select, Enter to confirm:",
-        ["NVIDIA", "OPENAI", "ANTHROPIC", "Custom"]
+        "Select an option:",
+        options
     )
     
     if provider_name is None:
@@ -192,22 +148,26 @@ async def execute(
         with open(env_path, "w") as f:
             f.write("# RED SHINOBI Environment Configuration\n")
     
+    # Update existing key flow
+    if provider_name == "Update Existing Key":
+        await _update_existing_key(env_path)
+        return
+    
+    # Read fresh values from .env file
+    env_values = dotenv_values(env_path)
+    
     # NVIDIA flow
     if provider_name == "NVIDIA":
         env_key = "NVIDIA_API_KEY"
-        existing_key = os.getenv(env_key)
+        existing_key = env_values.get(env_key)
         
-        if not existing_key:
+        if existing_key:
+            console.print(f"[dim]NVIDIA API key already configured[/dim]")
+            api_key = existing_key
+        else:
             api_key = console.input(f"[{THEME_COLOR}]Enter NVIDIA API key:[/{THEME_COLOR}] ").strip()
             if not api_key:
                 console.print(f"[{ACCENT_COLOR}][x] API key cannot be empty[/{ACCENT_COLOR}]")
-                return
-            
-            console.print(f"\n[dim]Verifying key...[/dim]")
-            is_valid, msg = verify_api_key("NVIDIA", api_key)
-            
-            if not is_valid:
-                console.print(f"[{ACCENT_COLOR}][x] Authentication failed: {msg}[/{ACCENT_COLOR}]")
                 return
             
             set_key(env_path, env_key, api_key)
@@ -215,12 +175,9 @@ async def execute(
             config.API_KEYS["nvidia"] = api_key
             config.reload_keys()
             console.print(f"[green][ok] NVIDIA API key saved[/green]")
-        else:
-            api_key = existing_key
-            console.print(f"[dim]NVIDIA API key already configured[/dim]")
         
         # Model adding loop
-        console.print(f"\n[dim]NVIDIA key ready. Type a model name to add (or leave blank to skip):[/dim]")
+        console.print(f"\n[dim]Add models (type model name or leave blank to finish):[/dim]")
         
         while True:
             model_name = await session.prompt_async("model name > ")
@@ -230,11 +187,10 @@ async def execute(
                 console.print(f"[green][ok] Done[/green]\n")
                 break
             
-            # Test model by calling NVIDIA endpoint (two-step verification)
+            # Test model
             console.print(f"[dim]Testing model '{model_name}'...[/dim]")
             try:
                 async with httpx.AsyncClient() as client:
-                    # Step 1: Try chat endpoint
                     response = await client.post(
                         "https://integrate.api.nvidia.com/v1/chat/completions",
                         headers={
@@ -246,11 +202,10 @@ async def execute(
                             "messages": [{"role": "user", "content": "hi"}],
                             "max_tokens": 1
                         },
-                        timeout=10.0
+                        timeout=15.0
                     )
                     
-                    if response.status_code in [200, 400]:
-                        # Chat endpoint success
+                    if response.status_code == 200:
                         add_to_catalog(
                             model_id=model_name,
                             base_url="https://integrate.api.nvidia.com/v1",
@@ -258,11 +213,13 @@ async def execute(
                             api_key_env="NVIDIA_API_KEY",
                             source="user"
                         )
-                        console.print(f"[green][ok] Model added to catalog: {model_name}[/green]")
+                        console.print(f"[green][ok] Model added: {model_name}[/green]")
                     elif response.status_code == 401:
-                        console.print(f"[{ACCENT_COLOR}][x] Invalid API key[/{ACCENT_COLOR}]")
+                        console.print(f"[{ACCENT_COLOR}][x] Invalid API key - use 'Update Existing Key' to fix[/{ACCENT_COLOR}]")
+                    elif response.status_code == 403:
+                        console.print(f"[{ACCENT_COLOR}][x] API key expired/forbidden - use 'Update Existing Key' to fix[/{ACCENT_COLOR}]")
                     elif response.status_code == 404:
-                        # Step 2: Try image endpoint
+                        # Try image endpoint
                         console.print(f"[dim]Not a chat model, trying image endpoint...[/dim]")
                         image_response = await client.post(
                             "https://integrate.api.nvidia.com/v1/images/generations",
@@ -275,11 +232,10 @@ async def execute(
                                 "prompt": "a red circle",
                                 "n": 1
                             },
-                            timeout=10.0
+                            timeout=15.0
                         )
                         
-                        if image_response.status_code in [200, 400]:
-                            # Image endpoint success
+                        if image_response.status_code == 200:
                             add_to_catalog(
                                 model_id=model_name,
                                 base_url="https://integrate.api.nvidia.com/v1",
@@ -287,40 +243,34 @@ async def execute(
                                 api_key_env="NVIDIA_API_KEY",
                                 source="user"
                             )
-                            console.print(f"[green][ok] Model added to catalog: {model_name}[/green]")
-                        elif image_response.status_code == 404:
-                            console.print(f"[{ACCENT_COLOR}][x] Model not found: {model_name}[/{ACCENT_COLOR}]")
-                        elif image_response.status_code == 401:
-                            console.print(f"[{ACCENT_COLOR}][x] Invalid API key[/{ACCENT_COLOR}]")
+                            console.print(f"[green][ok] Image model added: {model_name}[/green]")
                         else:
-                            console.print(f"[{ACCENT_COLOR}][x] Error {image_response.status_code}: {image_response.text[:100]}[/{ACCENT_COLOR}]")
+                            console.print(f"[{ACCENT_COLOR}][x] Model not found: {model_name}[/{ACCENT_COLOR}]")
                     else:
-                        console.print(f"[{ACCENT_COLOR}][x] Error {response.status_code}: {response.text[:100]}[/{ACCENT_COLOR}]")
+                        console.print(f"[{ACCENT_COLOR}][x] Error {response.status_code}[/{ACCENT_COLOR}]")
             except Exception as e:
-                console.print(f"[{ACCENT_COLOR}][x] Error testing model: {str(e)}[/{ACCENT_COLOR}]")
-            
-            console.print(f"\n[dim]Add another model? (type name or leave blank to finish):[/dim]")
+                console.print(f"[{ACCENT_COLOR}][x] Error: {str(e)}[/{ACCENT_COLOR}]")
     
     # OPENAI flow
     elif provider_name == "OPENAI":
-        api_key = console.input(f"[{THEME_COLOR}]Enter OPENAI API key:[/{THEME_COLOR}] ").strip()
-        if not api_key:
-            console.print(f"[{ACCENT_COLOR}][x] API key cannot be empty[/{ACCENT_COLOR}]")
-            return
+        env_key = "OPENAI_API_KEY"
+        existing_key = env_values.get(env_key)
         
-        console.print(f"\n[dim]Verifying key...[/dim]")
-        is_valid, msg = verify_api_key("OPENAI", api_key)
+        if existing_key:
+            console.print(f"[dim]OPENAI API key already configured[/dim]")
+            api_key = existing_key
+        else:
+            api_key = console.input(f"[{THEME_COLOR}]Enter OPENAI API key:[/{THEME_COLOR}] ").strip()
+            if not api_key:
+                console.print(f"[{ACCENT_COLOR}][x] API key cannot be empty[/{ACCENT_COLOR}]")
+                return
         
-        if not is_valid:
-            console.print(f"[{ACCENT_COLOR}][x] Authentication failed: {msg}[/{ACCENT_COLOR}]")
-            return
-        
-        set_key(env_path, "OPENAI_API_KEY", api_key)
+        set_key(env_path, env_key, api_key)
         load_dotenv(override=True)
         config.API_KEYS["openai"] = api_key
         config.reload_keys()
         
-        # Fetch and add models to catalog
+        # Fetch models
         console.print(f"[dim]Fetching available models...[/dim]")
         try:
             client = OpenAI(api_key=api_key)
@@ -328,9 +278,8 @@ async def execute(
             model_count = 0
             
             for model_obj in models_response.data:
-                model_id = model_obj.id
                 add_to_catalog(
-                    model_id=model_id,
+                    model_id=model_obj.id,
                     base_url="https://api.openai.com/v1",
                     endpoint_type="openai",
                     api_key_env="OPENAI_API_KEY",
@@ -338,13 +287,20 @@ async def execute(
                 )
                 model_count += 1
             
-            console.print(f"[green][ok] OPENAI key saved. {model_count} models added to catalog.[/green]\n")
+            console.print(f"[green][ok] OPENAI key saved. {model_count} models added.[/green]\n")
         except Exception as e:
-            console.print(f"[{ACCENT_COLOR}][x] Error fetching models: {str(e)}[/{ACCENT_COLOR}]")
-            console.print(f"[green][ok] OPENAI key saved (but model fetch failed)[/green]\n")
+            console.print(f"[{ACCENT_COLOR}][x] Error: {str(e)}[/{ACCENT_COLOR}]")
+            console.print(f"[yellow]Key saved but model fetch failed. Use 'Update Existing Key' if key is wrong.[/yellow]\n")
     
     # ANTHROPIC flow
     elif provider_name == "ANTHROPIC":
+        env_key = "ANTHROPIC_API_KEY"
+        existing_key = env_values.get(env_key)
+        
+        if existing_key:
+            console.print(f"[green][ok] ANTHROPIC API key already configured[/green]\n")
+            return
+        
         api_key = console.input(f"[{THEME_COLOR}]Enter ANTHROPIC API key:[/{THEME_COLOR}] ").strip()
         if not api_key:
             console.print(f"[{ACCENT_COLOR}][x] API key cannot be empty[/{ACCENT_COLOR}]")
@@ -354,20 +310,18 @@ async def execute(
             console.print(f"[{ACCENT_COLOR}][x] Invalid format. Must start with sk-ant-[/{ACCENT_COLOR}]")
             return
         
-        set_key(env_path, "ANTHROPIC_API_KEY", api_key)
+        set_key(env_path, env_key, api_key)
         load_dotenv(override=True)
         config.API_KEYS["anthropic"] = api_key
         config.reload_keys()
-        console.print(f"[green][ok] ANTHROPIC key saved.[/green]\n")
+        console.print(f"[green][ok] ANTHROPIC API key saved[/green]\n")
     
     # Custom flow
     elif provider_name == "Custom":
-        provider = console.input(f"[{THEME_COLOR}]Provider name (used as env var prefix, e.g. GROQ):[/{THEME_COLOR}] ").strip()
+        provider = console.input(f"[{THEME_COLOR}]Provider name (e.g. GROQ):[/{THEME_COLOR}] ").strip().upper()
         if not provider:
             console.print(f"[{ACCENT_COLOR}][x] Provider name cannot be empty[/{ACCENT_COLOR}]")
             return
-        
-        provider = provider.upper()
         
         base_url = console.input(f"[{THEME_COLOR}]Base URL (e.g. https://api.groq.com/v1):[/{THEME_COLOR}] ").strip()
         if not base_url:
@@ -379,8 +333,7 @@ async def execute(
             console.print(f"[{ACCENT_COLOR}][x] API key cannot be empty[/{ACCENT_COLOR}]")
             return
         
-        # Verify by calling /models endpoint
-        console.print(f"[dim]Verifying endpoint...[/dim]")
+        console.print(f"[dim]Fetching models...[/dim]")
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -390,24 +343,22 @@ async def execute(
                 )
                 
                 if response.status_code != 200:
-                    console.print(f"[{ACCENT_COLOR}][x] Verification failed: HTTP {response.status_code}[/{ACCENT_COLOR}]")
+                    console.print(f"[{ACCENT_COLOR}][x] Failed: HTTP {response.status_code}[/{ACCENT_COLOR}]")
                     return
                 
                 models_data = response.json()
                 model_ids = [m["id"] for m in models_data.get("data", [])]
                 
                 if not model_ids:
-                    console.print(f"[{ACCENT_COLOR}][x] No models found in response[/{ACCENT_COLOR}]")
+                    console.print(f"[{ACCENT_COLOR}][x] No models found[/{ACCENT_COLOR}]")
                     return
                 
-                # Save key
                 env_key = f"{provider}_API_KEY"
                 set_key(env_path, env_key, api_key)
                 load_dotenv(override=True)
                 config.API_KEYS[provider.lower()] = api_key
                 config.reload_keys()
                 
-                # Add models to catalog
                 for model_id in model_ids:
                     add_to_catalog(
                         model_id=model_id,
@@ -417,7 +368,67 @@ async def execute(
                         source="custom"
                     )
                 
-                console.print(f"[green][ok] {provider} saved. {len(model_ids)} models added to catalog.[/green]\n")
+                console.print(f"[green][ok] {provider} saved. {len(model_ids)} models added.[/green]\n")
         
         except Exception as e:
             console.print(f"[{ACCENT_COLOR}][x] Error: {str(e)}[/{ACCENT_COLOR}]")
+
+
+async def _update_existing_key(env_path: str) -> None:
+    """Update an existing API key."""
+    # Read directly from .env file (not os.getenv which may have stale values)
+    env_values = dotenv_values(env_path)
+    
+    # Find existing keys
+    existing_keys = []
+    key_map = {
+        "NVIDIA_API_KEY": "NVIDIA",
+        "OPENAI_API_KEY": "OPENAI", 
+        "ANTHROPIC_API_KEY": "ANTHROPIC"
+    }
+    
+    for env_var, name in key_map.items():
+        if env_values.get(env_var):
+            existing_keys.append(name)
+    
+    if not existing_keys:
+        console.print(f"[yellow]No existing API keys found. Add a new provider first.[/yellow]")
+        return
+    
+    existing_keys.append("Cancel")
+    
+    selected = await arrow_select(
+        "Select key to update:",
+        existing_keys
+    )
+    
+    if selected is None or selected == "Cancel":
+        console.print("[dim]Cancelled[/dim]")
+        return
+    
+    env_var = f"{selected}_API_KEY"
+    
+    # Show current key from .env file (masked)
+    current_key = env_values.get(env_var, "")
+    if current_key:
+        masked = current_key[:10] + "..." + current_key[-5:]
+        console.print(f"[dim]Current: {masked}[/dim]")
+    
+    new_key = console.input(f"[{THEME_COLOR}]Enter new {selected} API key:[/{THEME_COLOR}] ").strip()
+    
+    if not new_key:
+        console.print(f"[{ACCENT_COLOR}][x] API key cannot be empty[/{ACCENT_COLOR}]")
+        return
+    
+    # Validate Anthropic format
+    if selected == "ANTHROPIC" and not new_key.startswith("sk-ant-"):
+        console.print(f"[{ACCENT_COLOR}][x] Invalid format. Must start with sk-ant-[/{ACCENT_COLOR}]")
+        return
+    
+    # Save new key
+    set_key(env_path, env_var, new_key)
+    load_dotenv(override=True)
+    config.API_KEYS[selected.lower()] = new_key
+    config.reload_keys()
+    
+    console.print(f"[green][ok] {selected} API key updated![/green]\n")

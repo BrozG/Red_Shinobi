@@ -11,6 +11,7 @@ from rich.table import Table
 from prompt_toolkit import PromptSession
 
 from red_shinobi.core.mcp_client import MCPManager
+from red_shinobi.commands.auth_cmds import arrow_select
 
 console = Console()
 THEME_COLOR = "red"
@@ -167,13 +168,31 @@ async def disconnect_cmd(
         mcp_manager: The MCPManager instance
         session_history: The conversation history list
     """
+    # If no arg given, show interactive picker
     if not args:
-        console.print(f"[{ACCENT_COLOR}][x] Usage: /mcp-disconnect <server_name>[/{ACCENT_COLOR}]")
-        return
-    
-    server_name = args.strip()
+        servers = mcp_manager.list_servers()
+        if not servers:
+            console.print(f"\n[{ACCENT_COLOR}][x] No MCP servers connected.[/{ACCENT_COLOR}]\n")
+            return
+
+        server_names = [s["name"] for s in servers]
+        options = ["← Back"] + server_names
+
+        chosen = await arrow_select(
+            "Select server to disconnect (↑↓ navigate, Enter confirm, Esc cancel):",
+            options
+        )
+
+        if chosen is None or chosen == "← Back":
+            console.print("[dim]Cancelled[/dim]")
+            return
+
+        server_name = chosen
+    else:
+        server_name = args.strip()
+
     result = await mcp_manager.disconnect_server(server_name)
-    
+
     if "[ok]" in result:
         console.print(f"[green]{result}[/green]\n")
     else:
